@@ -14,24 +14,32 @@ class Ball:
         self.vPast = deque(maxlen=N)
 
 class Ball2D(Ball):
-    def __init__(self, position, velocity, radius, N, F, status_threshold=8):
+    def __init__(self, position, velocity, radius, N, F, status_threshold=10):
         Ball.__init__(self, position, velocity, radius, N, F)
         self.status_threshold = status_threshold # The number of contiguous frames to consider a patch of yellow a ball
         self.contiguous_seen = 1
         self.confirmed_ball = False # Will be confirmed whenever self.contiguous_seen >= a certain threshold
         # For debugging only
         self.updated = True  # Whether the ball was updated this frame
+        self.framesSinceUpdate = 1
+        self.lastObservedPosition = self.position # self.position could contain predictions too, not just observations
+        self.lastObservedVelocity = self.velocity
 
     def move(self, p):
         """A method that updates the position, and velocity of the ball"""
         self.velocity = p - self.position
+        self.lastObservedVelocity = p - self.lastObservedPosition # Difference between two observations
         self.position = p
+        self.lastObservedPosition = p
         self.pPast.append(self.position)
         self.vPast.append(self.velocity)
 
     def unseen_move(self):
         """A method that updates the position and velocity of the ball when it was not seen"""
-        pass
+        self.position = self.position + self.lastObservedVelocity / self.framesSinceUpdate
+        self.velocity = self.lastObservedVelocity / self.framesSinceUpdate
+        self.pPast.append(self.position)
+        self.vPast.append(self.velocity)
 
     def confirm_status(self, seen):
         """A method that updates contiguous_seen and therefore determines whether a ball is confirmed to be visible"""
@@ -40,12 +48,17 @@ class Ball2D(Ball):
         # elif not seen and not self.confirmed_ball:
         #     self.contiguous_seen = 0
         else: # Not seen but confirmed_ball already
-            self.contiguous_seen -= 2
-            self.contiguous_seen = max(0, self.contiguous_seen)
+            self.contiguous_seen = max(0, self.contiguous_seen - 1)
         if self.contiguous_seen >= self.status_threshold:
             self.confirmed_ball = True
         else:
             self.confirmed_ball = False
+
+    def prime(self, num):
+        """For a ball in the strict regime, this reduces the number of observations until we meet the status_threshold.
+        num is the number of observations we still need to make before meeting the status_threshold."""
+        self.contiguous_seen = max(self.contiguous_seen, self.status_threshold - num)
+
 
 
 class Ball3D(Ball):

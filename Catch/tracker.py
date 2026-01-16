@@ -36,6 +36,8 @@ class Tracker2D(Tracker):
             if (ball is not None) and (ball.F == self.frame): # It's been too long since we last saw the ball
                 self.balls[i] = None
                 empty_balls.add(i)
+            # if ball is not None:
+            #     print(ball.F, self.frame)
 
         for (p1_h, p1_w, r1) in potential_balls:
             updated = False
@@ -51,12 +53,11 @@ class Tracker2D(Tracker):
                 if np.linalg.norm(taylor_diff) < self.dispTolerance and abs(r1 - r0) < self.radiusTolerance: # A match
                     ball.move(p1) # Update its position
                     ball.radius = r1
-                    ball.F = self.frame
+                    ball.framesSinceUpdate = (self.frame - ball.F) % self.F
                     # num_updates += 1
                     updated_balls.add(i)
                     updated = True
                     ball.updated = True
-                    ball.confirm_status(True)
                     break
             if not updated and empty_balls: # Our potential ball can become a new ball we track!
                 first_empty_index = min(empty_balls)
@@ -67,13 +68,19 @@ class Tracker2D(Tracker):
                 # num_updates += 1
                 continue
 
+        for i in updated_balls: # Some balls can be updated multiple times, but some operations must be performed at most once
+            ball = self.balls[i]
+            ball.F = self.frame
+            ball.confirm_status(True)
+
         if len(updated_balls) < self.B: # We know not every ball has been updated
             for i in set(range(self.B)).difference(updated_balls):
-                if self.balls[i] is None:
+                ball = self.balls[i]
+                if ball is None:
                     continue
-                self.balls[i].unseen_move() # We should update them anyway
-                self.balls[i].updated = False
-                self.balls[i].confirm_status(False) # We didn't see the ball this frame
+                ball.unseen_move() # We should update them anyway
+                ball.updated = False
+                ball.confirm_status(False) # We didn't see the ball this frame
 
         self.frame = (self.frame + 1)%self.F # Roll the frame over
 
@@ -85,11 +92,13 @@ class Tracker3D(Tracker):
         self.angleTolerance = angleTolerance # In radians
         self.minPPrimeLen = minPPrimeLen # Must be strictly smaller than the N for balls
 
-    @staticmethod
-    def update_predictability(ball: Ball3D, seen) -> None:
+    def update_predictability(self, i, ball: Ball3D, seen) -> None:
         """Checks whether there have been self.predictedThreshold number of consecutive depth measurements"""
         if ball is None: return
         if ball.canPredict: return
+        if np.linalg.norm(ball.velocity) > depthEstimationPeriod*0.4:
+            self.balls[i] = Ball3D(position=ball.position, velocity=np.array([0, 0, 0]), radius=None, N=9, F=None)
+            return
         if seen:
             ball.consecutiveZ += 1
             if ball.consecutiveZ == ball.predictedThreshold: # Very important, we reset our pPast, vPast and pPrimePast
@@ -190,3 +199,53 @@ class Tracker3D(Tracker):
         yPred = eyes3D.normalized_to_meter_y(ball2D.position[0], zPred)
         pos3DPred = np.array([xPred, yPred, zPred])
         return pos3DPred
+
+class Meta2DTracker:
+    def __init__(self, m: int, n: int, dtype=np.float32):
+        # m is the number of balls tracked under the strict regime
+        # n is the number of balls tracked under the lax regime
+        self.m = m
+        self.n = n
+        self.A = np.full((m, 2), np.nan, dtype=dtype)
+        self.B = np.full((n, 2), np.nan, dtype=dtype)
+        self.diff = np.empty((m, n, 2), dtype=dtype)
+        self.distSquared = np.empty((m, n), dtype=dtype)
+        self.matchPattern = np.empty((m, n), dtype=bool)
+
+    def produceMatchMap(self, t1: Tracker2D, t2: Tracker2D, threshold: float) -> np.ndarray:
+        """a contains centroids in the strict regime
+        b contains centroids in the lax regime"""
+        a = t1.balls
+        b = t2.balls
+        if len(a) != self.m or len(b) != self.n:
+            raise ValueError(f"Expected lengths a={self.m}, b={self.n}")
+        self.A[:] = np.nan
+        self.B[:] = np.nan
+
+        for i, v in enumerate(a):
+            if v is not None:
+                self.A[i] = v.position
+        for j, v in enumerate(b):
+            if v is not None and v.updated:
+                self.B[j] = v.position
+
+        np.subtract(self.A[:, None, :], self.B[None, :, :], out=self.diff)
+        np.multiply(self.diff, self.diff, out=self.diff)
+        np.sum(self.diff, axis=-1, out=self.distSquared)
+        np.less(self.distSquared, threshold**2, out=self.matchPattern)
+
+    def processMatchMap(self, t1: Tracker2D, t2: Tracker2D):
+        """Returns pairs (ballStrict, ballLax) that are matches"""
+        row_counts = (self.matchPattern.sum(axis=1) == 1)
+        cols = self.matchPattern.argmax(axis=1)
+        rows = np.nonzero(row_counts)[0]
+        pairs = np.column_stack((rows, cols[row_counts]))
+        matchedPairs =  [(t1.balls[i], t2.balls[j]) for i, j in pairs]
+
+        for (ball2DStrict, ball2DLax) in matchedPairs:
+            if not ball2DStrict.confirmed_ball and ball2DStrict.updated and ball2DLax.confirmed_ball:  # We can now prime the strict ball
+                ball2DStrict.prime(2)
+            elif ball2DStrict.confirmed_ball and not ball2DStrict.updated and ball2DLax.confirmed_ball:
+                ball2DStrict.move(ball2DLax.position)
+                ball2DStrict.confirm_status(True)
+                ball2DStrict.F = ball2DStrict.F

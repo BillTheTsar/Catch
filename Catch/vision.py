@@ -14,7 +14,7 @@ A Vision2D object takes in an image, then performs the following:
 """
 
 class Vision2D:
-    def __init__(self, H, W, B, minradius=2, maxradius=64, padding=0):
+    def __init__(self, H, W, B, LOWER, UPPER, LOWERR, UPPERR, minradius, maxradius, padding=0):
         self.H = H # Height of the full-scale image
         self.W = W # Width of the full-scale image
         self.B = B
@@ -24,17 +24,16 @@ class Vision2D:
 
         # These are specific to our project
         # These are for color masking
-        hl, hh, sl, sh, vl, vh = (25, 41, 85, 255, 80, 255) # Color of the tennis ball
-        self.LOWER = np.array([hl, sl, vl], dtype=np.uint8)
-        self.UPPER = np.array([hh, sh, vh], dtype=np.uint8)
-        self.LOWERR = np.array([hl-3, sl, vl], dtype=np.uint8)
-        self.UPPERR = np.array([hh+3, sh, vh], dtype=np.uint8)
+        self.LOWER = np.array(LOWER, dtype=np.uint8)
+        self.UPPER = np.array(UPPER, dtype=np.uint8)
+        self.LOWERR = np.array(LOWERR, dtype=np.uint8)
+        self.UPPERR = np.array(UPPERR, dtype=np.uint8)
 
-        # These are parameters for the Hough transform
-        self.DP = 1.2  # inverse accumulator ratio
-        self.MIN_DIST = 160  # minimum distance between detected centers (in pixels)
-        self.PARAM1 = 100  # Canny high threshold
-        self.PARAM2 = 50  # accumulator threshold for center detection
+        # # These are parameters for the Hough transform
+        # self.DP = 1.2  # inverse accumulator ratio
+        # self.MIN_DIST = 160  # minimum distance between detected centers (in pixels)
+        # self.PARAM1 = 100  # Canny high threshold
+        # self.PARAM2 = 50  # accumulator threshold for center detection
 
     @staticmethod
     def generate_web(centroid_h, centroid_w, step, H, W):
@@ -56,7 +55,7 @@ class Vision2D:
         We return a list of centroids, each centroid is a tuple of (centroid_h, centroid_w, radius) and (H, W)"""
         H, W = left_img.shape[:2]
         scale = H/self.H # Scale of the downscaled left_img
-        found_centroids = False
+        # found_centroids = False
         hsv = cv2.cvtColor(left_img, cv2.COLOR_BGR2HSV) # Color conversion to HSV
         mask_raw = cv2.inRange(hsv, self.LOWER, self.UPPER) # Mask production using the HSV
 
@@ -65,6 +64,10 @@ class Vision2D:
             ksize = H//180 + 1 # This must be an odd number
         else:
             ksize = H//180 # This works in practice we found
+        # if (H//240)%2 == 0:
+        #     ksize = H//240 + 1 # This must be an odd number
+        # else:
+        #     ksize = H//240 # This works in practice we found
         kernel = np.ones((ksize, ksize), np.uint8)
         mask = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -83,7 +86,7 @@ class Vision2D:
             # print(radius, stats[i, cv2.CC_STAT_AREA])
             if stats[i, cv2.CC_STAT_AREA] <= theoreticalArea/2:
                 continue
-            found_centroids = True  # There exist centroids in the frame that are reasonably sized
+            # found_centroids = True  # There exist centroids in the frame that are reasonably sized
             centroid_w_pixel = centroids[i, 0]
             centroid_h_pixel = centroids[i, 1]
             # if not ((self.padding*scale <= centroid_w_pixel <= W - self.padding*scale) and
@@ -92,7 +95,7 @@ class Vision2D:
 
             # We now check whether the centroid is valid or likely a yellow wall
             color_web = [hsv[pi, pj] for (pi, pj) in self.generate_web(int(centroid_h_pixel), int(centroid_w_pixel),
-                                                                        int(min(self.maxradius*scale, 1.8*radius)), H, W)]
+                                                                        int(min(self.maxradius*scale, 2*radius)), H, W)]
             count_in_range = sum(
                 np.all(self.LOWERR <= color) and np.all(color <= self.UPPERR) for color in color_web
             )
@@ -100,8 +103,8 @@ class Vision2D:
                 centroid_w, centroid_h = centroid_w_pixel / W, centroid_h_pixel / H
                 centroids_info.append([centroid_h, centroid_w, radius])
         centroids_info = sorted(centroids_info, key=lambda x: x[-1], reverse=True) # We reverse-sort by centroids by radius
-        return found_centroids, centroids_info[:self.B], (H, W) # We only return up to self.B number of centroids
-
+        # return found_centroids, centroids_info[:self.B], (H, W) # We only return up to self.B number of centroids
+        return centroids_info[:self.B], (H, W)  # We only return up to self.B number of centroids
 
     def find_circles_hough(self, left_img):
         H, W = left_img.shape[:2]

@@ -12,8 +12,8 @@ from configVariables import *
 
 # ========= USER SETTINGS =========
 # video_path    = "C:/Users/HP/Pictures/Camera Roll/WIN_20251128_20_00_11_Pro.mp4"
-video_path    = "C:/Users/HP/Pictures/Camera Roll/(0.365, 1.516).mp4"
-out_video     = "track2D/overlay(0.365, 1.516).mp4"
+video_path    = "C:/Users/HP/Pictures/Camera Roll/WIN_20251128_19_59_42_Pro.mp4"
+out_video     = "track2D/overlay5.mp4"
 out_csv       = "track2D/predictTrackMisc.csv"
 NPZ_PATH      = "D:/Catch/stereoExperiment/stereo_params.npz"
 K_TXT_FULL    = "K.txt"   # for the FULL rectified frame
@@ -22,11 +22,11 @@ SAVE_DIR      = "track2D"
 ENGINE_PATH = "D:/S2M2/s2m2/engines/S2M2_L_224_224_fp16.engine"
 padding = 20 # With respect to the full-scale image. The padding for vision and depth estimation are separate
 predictionGap = 4 # The no. frames between when we made the prediction and when we check whether it was accurate
-weightFunc = lambda x: max(2/(1 + np.exp(2*x)), 0.02)
+weightFunc = lambda x: max(2/(1 + np.exp(4*x)), 0.02)
 
 del_t = 1/FPS
 
-def find_best_circles(circles_info, H, W, dist_tolerance=80):
+def find_best_circles(circles_info, H, W, dist_tolerance=20):
     # dist_tolerance is the number of pixels between centers and seen centroid centers for them to be considered the
     # centers for the same circle
     best_circles_info = []
@@ -112,13 +112,18 @@ if not out.isOpened():
     cap.release()
     raise IOError(f"Could not open output VideoWriter: {out_video}")
 
+B = 4
+F = 7
 # Instantiating all objects
-B = 5
-F = 5
-tracker_2D = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(20*SCALE))
+tracker2DStrict = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(16*SCALE))
+tracker2DLax = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(16*SCALE))
 tracker_3D = tracker.Tracker3D(B=B, dispTolerance=0.15, angleTolerance=np.pi/4)
-eyes_2D = vision.Vision2D(H=H_full, W=W_full, B=B)
+eyes2DStrict = vision.Vision2D(H=H_full, W=W_full, B=B, LOWER=[26, 75, 80], UPPER=[41, 255, 255],
+                          LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=64)
+eyes2DLax = vision.Vision2D(H=H_full, W=W_full, B=B, LOWER=[21, 70, 80], UPPER=[45, 255, 255],
+                            LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=24)
 eyes_3D = vision.Vision3D(H_full=H_full, W_full=W_full, K_path=K_TXT_FULL, engine_path=ENGINE_PATH)
+meta2DTracker = tracker.Meta2DTracker(B, B)
 
 # Some OS humdrum
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -144,22 +149,27 @@ while True:
     left_full, right_full = split_sbs(frame_bgr) # Full scale images
     rectL = cv2.remap(left_full, mapLx, mapLy, cv2.INTER_LINEAR) # Rectification
     rectR = cv2.remap(right_full, mapRx, mapRy, cv2.INTER_LINEAR) # Rectification
-    # Downscaling for eyes_2D
+    # Downscaling for eyes2DStrict
     rectL_half = cv2.resize(rectL, (int(W_full * SCALE), int(H_full * SCALE)), interpolation=cv2.INTER_AREA)
 
     # We use Vision2D to find the centroids and centers in rectL_half
-    found_centroids, centroids, (H_centroids, W_centroids) = eyes_2D.find_centroids_hsv(rectL_half)
-    if found_centroids: # Non-empty centroids detected
-        best_circles = find_best_circles(centroids, H_centroids, W_centroids, dist_tolerance=int(SCALE*160))
-        tracker_2D.update(best_circles)
-    else:
-        best_circles, (H_circles, W_circles) = eyes_2D.find_circles_hough(rectL_half)
-        # We now update our system via tracker_2D
-        tracker_2D.update(best_circles)
+    centroidsStrict, (H_centroids, W_centroids) = eyes2DStrict.find_centroids_hsv(rectL_half)
+    # if found_centroids: # Non-empty centroids detected
+    best_circles_strict = find_best_circles(centroidsStrict, H_centroids, W_centroids, dist_tolerance=int(SCALE*160))
+    tracker2DStrict.update(best_circles_strict)
+    # else:
+    #     best_circles, (H_circles, W_circles) = eyes2DStrict.find_circles_hough(rectL_half)
+    #     # We now update our system via tracker2DStrict
+    #     tracker2DStrict.update(best_circles)
+    centroidsLax, (H_centroids, W_centroids) = eyes2DLax.find_centroids_hsv(rectL_half) # Parallelize!
+    best_circles_lax = find_best_circles(centroidsLax, H_centroids, W_centroids, dist_tolerance=int(SCALE*160))
+    tracker2DLax.update(best_circles_lax)
+    meta2DTracker.produceMatchMap(tracker2DStrict, tracker2DLax, 0.03)
+    meta2DTracker.processMatchMap(tracker2DStrict, tracker2DLax)
 
     # We write to the csv file now
     line = [frame_id]
-    for ball in tracker_2D.balls:
+    for ball in tracker2DStrict.balls:
         if ball is None:
             line += [None] * lengthPerEntry
         else:
@@ -169,9 +179,9 @@ while True:
     # ----------------------------------- The real stuff happens here -----------------------------------
 
     # Frame annotation
-    for i, ball in enumerate(tracker_2D.balls):
-        if ball is None or not ball.confirmed_ball:
-            tracker_3D.balls[i] = None # We delete whatever 3D ball that was there
+    for i, ball in enumerate(tracker2DStrict.balls):
+        if ball is None or not ball.confirmed_ball: # We can't do anything
+            tracker_3D.balls[i] = None
             continue
         ball3D = tracker_3D.balls[i]  # The corresponding 3D counterpart
         (center_h, center_w) = ball.position
@@ -218,7 +228,7 @@ while True:
                     tracker_3D.balls[i] = None # We delete the 3D ball
                     posStar3D = None
                     continue
-            tracker_3D.update_predictability(ball3D, ball.updated)
+            tracker_3D.update_predictability(i, ball3D, ball.updated)
         else: # Even if we don't observe depth, sometimes we can make predictions based on past depths
             if ball3D is None: # There is no existing 3D data, hence we continue
                 continue
