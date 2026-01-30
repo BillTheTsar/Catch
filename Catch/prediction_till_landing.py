@@ -9,8 +9,8 @@ import time
 from configVariables import *
 
 # ========= USER SETTINGS =========
-video_path    = "C:/Users/HP/Pictures/Camera Roll/(0, 1.266).mp4"
-out_video     = "track2D/overlay(0, 1.266).mp4"
+video_path    = "C:/Users/HP/Pictures/Camera Roll/WIN_20251128_19_59_42_Pro.mp4"
+out_video     = "track2D/overlay5.mp4"
 out_csv       = "track2D/predictTrackMisc.csv"
 NPZ_PATH      = "D:/Catch/stereoExperiment/stereo_params.npz"
 K_TXT         = "K.txt"   # for the FULL rectified frame
@@ -74,9 +74,9 @@ tracker2DStrict = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=i
 tracker2DLax = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(16*SCALE))
 tracker_3D = tracker.Tracker3D(B=B, dispTolerance=0.15, angleTolerance=np.pi/4)
 eyes2DStrict = vision.Vision2D(H=H_full, W=W_full, B=B, LOWER=[26, 75, 80], UPPER=[41, 255, 255],
-                          LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=64)
+                          LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=64, ksize=3)
 eyes2DLax = vision.Vision2D(H=H_full, W=W_full, B=B, LOWER=[21, 70, 80], UPPER=[45, 255, 255],
-                            LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=24)
+                            LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=24, ksize=3)
 eyes3D = vision.Vision3D(H_full=H_full, W_full=W_full, K_path=K_TXT, engine_path=ENGINE_PATH)
 meta2DTracker = tracker.Meta2DTracker(B, B)
 
@@ -106,10 +106,6 @@ while True:
                                  interpolation=cv2.INTER_AREA)
     rectL_downscaled = cv2.remap(left_downscaled, mapLx_downscaled, mapLy_downscaled, cv2.INTER_LINEAR,
                       borderMode=cv2.BORDER_CONSTANT)
-    # rectL = cv2.remap(left_full, mapLx, mapLy, cv2.INTER_LINEAR) # Rectification
-    # rectR = cv2.remap(right_full, mapRx, mapRy, cv2.INTER_LINEAR) # Rectification
-    # Downscaling for eyes2DStrict
-    # rectL_half = cv2.resize(rectL, (int(W_full * SCALE), int(H_full * SCALE)), interpolation=cv2.INTER_AREA)
 
     # We use Vision2D to find the centroids and centers in rectL_half
     centroidsStrict, (H_centroids, W_centroids) = eyes2DStrict.find_centroids_hsv(rectL_downscaled)

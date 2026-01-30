@@ -14,13 +14,12 @@ A Vision2D object takes in an image, then performs the following:
 """
 
 class Vision2D:
-    def __init__(self, H, W, B, LOWER, UPPER, LOWERR, UPPERR, minradius, maxradius, padding=0):
+    def __init__(self, H, W, B, LOWER, UPPER, LOWERR, UPPERR, minradius, maxradius, ksize):
         self.H = H # Height of the full-scale image
         self.W = W # Width of the full-scale image
         self.B = B
         self.minradius = minradius # With respect to the full-scale image
         self.maxradius = maxradius
-        self.padding = padding # With respect to the full-scale image
 
         # These are specific to our project
         # These are for color masking
@@ -28,10 +27,19 @@ class Vision2D:
         self.UPPER = np.array(UPPER, dtype=np.uint8)
         self.LOWERR = np.array(LOWERR, dtype=np.uint8)
         self.UPPERR = np.array(UPPERR, dtype=np.uint8)
+        self.morphologyKernel = np.ones((ksize, ksize), dtype=np.uint8)
 
     @staticmethod
     def generate_web(centroid_h, centroid_w, step, H, W):
-        """Checks with neighboring pixels whether the current centroid is a tennis ball or a yellow wall"""
+        """
+        :param centroid_h: The pixel height of the centroid center.
+        :param centroid_w: The pixel width of the centroid center.
+        :param step: The interval size of the web.
+        :param H: Used to make sure the web is contained within the image.
+        :param W: Used to make sure the web is contained within the image.
+        :return: A list of at most 9 points surrounding the centroid center.
+        Used to determine whether the current centroid is a tennis ball or a yellow wall.
+        """
         offsets = [-step, 0, step]
         points = []
 
@@ -44,55 +52,63 @@ class Vision2D:
         return points
 
     def find_centroids_hsv(self, left_img):
-        """left_img must be the rectified left image of the stereo pair in BGR order.
-        Ideally, left_img has scale 0.5 to reduce computation time.
-        We return a list of centroids, each centroid is a tuple of (centroid_h, centroid_w, radius) and (H, W)"""
+        """
+        :param left_img: The rectified left image of the stereo pair in BGR format.
+                Ideally, left_img has scale 0.5 or even 0.25 to reduce computation time.
+        :return: A list of centroids, each centroid is a tuple of (centroid_h, centroid_w, radius) and (H, W)
+        """
         H, W = left_img.shape[:2]
-        # found_centroids = False
         hsv = cv2.cvtColor(left_img, cv2.COLOR_BGR2HSV) # Color conversion to HSV
         mask_raw = cv2.inRange(hsv, self.LOWER, self.UPPER) # Mask production using the HSV
 
         # MorphologyEx
-        if (H//180)%2 == 0:
-            ksize = H//180 + 1 # This must be an odd number
-        else:
-            ksize = H//180 # This works in practice we found
-        kernel = np.ones((ksize, ksize), np.uint8)
-        mask = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
+        mask = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, self.morphologyKernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morphologyKernel)
 
         num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num <= 1: # We only have the background, no need to proceed further
+            return [], (H, W)
+
+        # We try to vectorize earlier logic for maximum efficiency
+        stats_foreground = stats[1:]  # Index 0 is always the background, which is never a ball
+        centroids_foreground = centroids[1:]
+        widths = stats_foreground[:, cv2.CC_STAT_WIDTH]
+        heights = stats_foreground[:, cv2.CC_STAT_HEIGHT]
+        areas = stats_foreground[:, cv2.CC_STAT_AREA]
+        radii = np.maximum(widths, heights) // 2 # Vectorized radii according to our definition
+
+        minRadiusScale, maxRadiusScale = self.minradius * SCALE, self.maxradius * SCALE
+        valid_radius = (radii >= minRadiusScale) & (radii <= maxRadiusScale)
+        theoretical_area = np.pi * radii ** 2
+        valid_area = areas > (theoretical_area / 2)
+        valid_mask = valid_area & valid_radius
+        idxs = np.flatnonzero(valid_mask)
+
+        if idxs.size == 0:
+            return [], (H, W)
+
+        idxs = idxs[np.argsort(radii[idxs])[::-1]] # The valid indices sorted in descending order by radius
+
         centroids_info = []
-        for i in range(num):
-            # area = stats[i, cv2.CC_STAT_AREA]
-            # We estimate and check the radius
-            radius = max(stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]) // 2 # w.r.t. scaled down image
-            if radius > self.maxradius*SCALE or radius < self.minradius*SCALE:
-                continue
-            # Area check
-            theoreticalArea = np.pi*radius**2
-            # print(radius, stats[i, cv2.CC_STAT_AREA])
-            if stats[i, cv2.CC_STAT_AREA] <= theoreticalArea/2:
-                continue
-            # found_centroids = True  # There exist centroids in the frame that are reasonably sized
-            centroid_w_pixel = centroids[i, 0]
-            centroid_h_pixel = centroids[i, 1]
-            # if not ((self.padding*scale <= centroid_w_pixel <= W - self.padding*scale) and
-            #         (self.padding*scale <= centroid_h_pixel <= H - self.padding*scale)): # Vision padding
-            #     continue
+        for i in idxs:
+            radius = int(radii[i])
+            centroid_w_pixel = int(centroids_foreground[i, 0])
+            centroid_h_pixel = int(centroids_foreground[i, 1])
 
             # We now check whether the centroid is valid or likely a yellow wall
-            color_web = [hsv[pi, pj] for (pi, pj) in self.generate_web(int(centroid_h_pixel), int(centroid_w_pixel),
-                                                                        int(min(self.maxradius*SCALE, 2*radius)), H, W)]
-            count_in_range = sum(
-                np.all(self.LOWERR <= color) and np.all(color <= self.UPPERR) for color in color_web
-            )
+            step = int(min(self.maxradius*SCALE, 2*radius))
+            rows = np.array([centroid_h_pixel - step, centroid_h_pixel, centroid_h_pixel + step], dtype=np.int32)
+            cols = np.array([centroid_w_pixel - step, centroid_w_pixel, centroid_w_pixel + step], dtype=np.int32)
+            valid_rows = (rows >= 0) & (rows < H)
+            valid_cols = (cols >= 0) & (cols < W)
+            rows_v = rows[valid_rows]
+            cols_v = cols[valid_cols]
+            patch = hsv[np.ix_(rows_v, cols_v)]
+            in_range = np.all((patch >= self.LOWERR) & (patch <= self.UPPERR), axis=-1)
+            count_in_range = np.count_nonzero(in_range)
             if count_in_range == 1:
                 centroid_w, centroid_h = centroid_w_pixel / W, centroid_h_pixel / H
                 centroids_info.append([centroid_h, centroid_w, radius])
-        centroids_info = sorted(centroids_info, key=lambda x: x[-1], reverse=True) # We reverse-sort by centroids by radius
-        # return found_centroids, centroids_info[:self.B], (H, W) # We only return up to self.B number of centroids
         return centroids_info[:self.B], (H, W)  # We only return up to self.B number of centroids
 
     @staticmethod
