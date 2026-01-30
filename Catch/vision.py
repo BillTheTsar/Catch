@@ -67,7 +67,7 @@ class Vision2D:
 
         num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
         if num <= 1: # We only have the background, no need to proceed further
-            return [], (H, W)
+            return []
 
         # We try to vectorize earlier logic for maximum efficiency
         stats_foreground = stats[1:]  # Index 0 is always the background, which is never a ball
@@ -85,9 +85,7 @@ class Vision2D:
         idxs = np.flatnonzero(valid_mask)
 
         if idxs.size == 0:
-            return [], (H, W)
-
-        idxs = idxs[np.argsort(radii[idxs])[::-1]] # The valid indices sorted in descending order by radius
+            return []
 
         centroids_info = []
         for i in idxs:
@@ -109,7 +107,8 @@ class Vision2D:
             if count_in_range == 1:
                 centroid_w, centroid_h = centroid_w_pixel / W, centroid_h_pixel / H
                 centroids_info.append([centroid_h, centroid_w, radius])
-        return centroids_info[:self.B], (H, W)  # We only return up to self.B number of centroids
+        centroids_info = sorted(centroids_info, key=lambda x: x[-1], reverse=True)  # We reverse-sort by centroids by radius
+        return centroids_info[:self.B]  # We only return up to self.B number of centroids
 
     @staticmethod
     def find_best_circles(circles_info, H, W, dist_tolerance=40 * SCALE):

@@ -6,6 +6,7 @@ import cv2
 import os
 import csv
 import time
+from concurrent.futures import ThreadPoolExecutor
 from configVariables import *
 
 # ========= USER SETTINGS =========
@@ -24,6 +25,32 @@ def split_sbs(frame):
     h, w = frame.shape[:2]
     mid = w // 2
     return frame[:, :mid], frame[:, mid:]
+
+def updateStrict(rectL_downscaled):
+    """
+    :param rectL_downscaled: Downscaled, rectified left image from the stereo pair
+    :return: True
+    A worker function handling the Strict tracker for concurrency.
+    """
+    # We use Vision2D to find the centroids and centers in rectL_half
+    centroids = eyes2DStrict.find_centroids_hsv(rectL_downscaled)  # Bottleneck line
+    best_circles = eyes2DStrict.find_best_circles(centroids, H_centroids, W_centroids,
+                                                         dist_tolerance=int(SCALE * 160))
+    tracker2DStrict.update(best_circles)
+    return True
+
+def updateLax(rectL_downscaled):
+    """
+        :param rectL_downscaled: Downscaled, rectified left image from the stereo pair
+        :return: True
+        A worker function handling the Strict tracker for concurrency.
+        """
+    # We use Vision2D to find the centroids and centers in rectL_half
+    centroids = eyes2DLax.find_centroids_hsv(rectL_downscaled) # Parallelize!
+    best_circles = eyes2DStrict.find_best_circles(centroids, H_centroids, W_centroids,
+                                                      dist_tolerance=int(SCALE*160))
+    tracker2DLax.update(best_circles)
+    return True
 
 """
 Steps we must take:
@@ -72,6 +99,8 @@ F = 7
 # Instantiating all objects
 tracker2DStrict = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(16*SCALE))
 tracker2DLax = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(16*SCALE))
+strictLaxPool = ThreadPoolExecutor(max_workers=2)
+
 tracker_3D = tracker.Tracker3D(B=B, dispTolerance=0.15, angleTolerance=np.pi/4)
 eyes2DStrict = vision.Vision2D(H=H_full, W=W_full, B=B, LOWER=[26, 75, 80], UPPER=[41, 255, 255],
                           LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=64, ksize=3)
@@ -106,14 +135,11 @@ while True:
                                  interpolation=cv2.INTER_AREA)
     rectL_downscaled = cv2.remap(left_downscaled, mapLx_downscaled, mapLy_downscaled, cv2.INTER_LINEAR,
                       borderMode=cv2.BORDER_CONSTANT)
-
-    # We use Vision2D to find the centroids and centers in rectL_half
-    centroidsStrict, (H_centroids, W_centroids) = eyes2DStrict.find_centroids_hsv(rectL_downscaled)
-    best_circles_strict = eyes2DStrict.find_best_circles(centroidsStrict, H_centroids, W_centroids, dist_tolerance=int(SCALE*160))
-    tracker2DStrict.update(best_circles_strict)
-    centroidsLax, (H_centroids, W_centroids) = eyes2DLax.find_centroids_hsv(rectL_downscaled) # Parallelize!
-    best_circles_lax = eyes2DStrict.find_best_circles(centroidsLax, H_centroids, W_centroids, dist_tolerance=int(SCALE*160))
-    tracker2DLax.update(best_circles_lax)
+    H_centroids, W_centroids = rectL_downscaled.shape[:2]
+    f_strict = strictLaxPool.submit(updateStrict, rectL_downscaled)
+    f_lax = strictLaxPool.submit(updateLax, rectL_downscaled)
+    f_strict.result()
+    f_lax.result()
     meta2DTracker.produceMatchMap(tracker2DStrict, tracker2DLax, 0.03)
     meta2DTracker.processMatchMap(tracker2DStrict, tracker2DLax)
 
@@ -239,6 +265,7 @@ while True:
 cap.release()
 out.release()
 csvfile.close()
+strictLaxPool.shutdown(wait=True)
 
 t1 = time.time()
 print(f"Time taken for video with {frame_id} frames: {t1 - t0} seconds")

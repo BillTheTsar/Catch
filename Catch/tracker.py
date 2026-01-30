@@ -74,7 +74,9 @@ class Tracker2D(Tracker):
             ball.confirm_status(True)
 
         if len(updated_balls) < self.B: # We know not every ball has been updated
-            for i in set(range(self.B)).difference(updated_balls):
+            for i in range(self.B):
+                if i in updated_balls:
+                    continue
                 ball = self.balls[i]
                 if ball is None:
                     continue
