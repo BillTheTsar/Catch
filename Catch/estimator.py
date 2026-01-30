@@ -28,9 +28,6 @@ def bestVelocity3DGravity(pPrimePast, del_t):
         vStar = np.zeros(3)
         pred = pPrimePast[0] + 0.5 * g * (del_t ** 2)
         return vStar, pred
-    # if n == 2: # Still trivial
-    #     vStar = (pPrimePast[1] - pPrimePast[0] - 0.5*g*del_t**2)/del_t
-    #     return vStar, pPrimePast[0] + 2*vStar*del_t + 0.5*g*(2*del_t)**2
 
     numerator = np.zeros(3, dtype=float)
     denominator = 0

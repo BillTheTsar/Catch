@@ -96,7 +96,7 @@ class Tracker3D(Tracker):
         """Checks whether there have been self.predictedThreshold number of consecutive depth measurements"""
         if ball is None: return
         if ball.canPredict: return
-        if np.linalg.norm(ball.velocity) > depthEstimationPeriod*0.4:
+        if np.linalg.norm(ball.velocity) > depthEstimationPeriod*0.4: # The ball moved too fast to start prediction
             self.balls[i] = Ball3D(position=ball.position, velocity=np.array([0, 0, 0]), radius=None, N=9, F=None)
             return
         if seen:

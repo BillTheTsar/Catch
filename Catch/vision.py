@@ -1,3 +1,4 @@
+from configVariables import *
 import os
 import cv2
 import numpy as np
@@ -9,7 +10,6 @@ A Vision2D object takes in an image, then performs the following:
 1. Runs HSV masking
 2. Morphologies
 3. Connected components and centroids
-4. Hough transform
 5. Output all centroids, radii of tennis balls
 """
 
@@ -28,12 +28,6 @@ class Vision2D:
         self.UPPER = np.array(UPPER, dtype=np.uint8)
         self.LOWERR = np.array(LOWERR, dtype=np.uint8)
         self.UPPERR = np.array(UPPERR, dtype=np.uint8)
-
-        # # These are parameters for the Hough transform
-        # self.DP = 1.2  # inverse accumulator ratio
-        # self.MIN_DIST = 160  # minimum distance between detected centers (in pixels)
-        # self.PARAM1 = 100  # Canny high threshold
-        # self.PARAM2 = 50  # accumulator threshold for center detection
 
     @staticmethod
     def generate_web(centroid_h, centroid_w, step, H, W):
@@ -54,7 +48,6 @@ class Vision2D:
         Ideally, left_img has scale 0.5 to reduce computation time.
         We return a list of centroids, each centroid is a tuple of (centroid_h, centroid_w, radius) and (H, W)"""
         H, W = left_img.shape[:2]
-        scale = H/self.H # Scale of the downscaled left_img
         # found_centroids = False
         hsv = cv2.cvtColor(left_img, cv2.COLOR_BGR2HSV) # Color conversion to HSV
         mask_raw = cv2.inRange(hsv, self.LOWER, self.UPPER) # Mask production using the HSV
@@ -64,10 +57,6 @@ class Vision2D:
             ksize = H//180 + 1 # This must be an odd number
         else:
             ksize = H//180 # This works in practice we found
-        # if (H//240)%2 == 0:
-        #     ksize = H//240 + 1 # This must be an odd number
-        # else:
-        #     ksize = H//240 # This works in practice we found
         kernel = np.ones((ksize, ksize), np.uint8)
         mask = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -79,7 +68,7 @@ class Vision2D:
             # area = stats[i, cv2.CC_STAT_AREA]
             # We estimate and check the radius
             radius = max(stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]) // 2 # w.r.t. scaled down image
-            if radius > self.maxradius*scale or radius < self.minradius*scale:
+            if radius > self.maxradius*SCALE or radius < self.minradius*SCALE:
                 continue
             # Area check
             theoreticalArea = np.pi*radius**2
@@ -95,7 +84,7 @@ class Vision2D:
 
             # We now check whether the centroid is valid or likely a yellow wall
             color_web = [hsv[pi, pj] for (pi, pj) in self.generate_web(int(centroid_h_pixel), int(centroid_w_pixel),
-                                                                        int(min(self.maxradius*scale, 2*radius)), H, W)]
+                                                                        int(min(self.maxradius*SCALE, 2*radius)), H, W)]
             count_in_range = sum(
                 np.all(self.LOWERR <= color) and np.all(color <= self.UPPERR) for color in color_web
             )
@@ -106,49 +95,67 @@ class Vision2D:
         # return found_centroids, centroids_info[:self.B], (H, W) # We only return up to self.B number of centroids
         return centroids_info[:self.B], (H, W)  # We only return up to self.B number of centroids
 
-    def find_circles_hough(self, left_img):
-        H, W = left_img.shape[:2]
-        return [], (H, W)
-    # def find_circles_hough(self, left_img):
-    #     """left_img must be the rectified left image of the stereo pair in BGR order.
-    #     Ideally, left_img has scale 0.5 to reduce computation time.
-    #     We return a list of centers, each centers is a tuple of (center_h, center_w, radius) and (H, W)"""
-    #     H, W = left_img.shape[:2]
-    #     scale = H/self.H
-    #     # green = cv2.split(left_img)[1] # Green channel
-    #     gray = cv2.cvtColor(left_img, cv2.COLOR_BGR2GRAY) # Color conversion to gray
-    #     # hsv = cv2.cvtColor(left_img, cv2.COLOR_BGR2HSV)
-    #     # hue = hsv[:,:,0]
-    #     if (H//120)%2 == 0:
-    #         ksize = H//120 + 1 # Must be an odd number
-    #     else:
-    #         ksize = H//120 # This works in practice we found
-    #     gray_blur = cv2.medianBlur(gray, ksize) # A Gaussian blur to prepare for the Hough transform
-    #
-    #     # The Hough transform
-    #     circles = cv2.HoughCircles(
-    #         gray_blur,
-    #         cv2.HOUGH_GRADIENT,
-    #         dp=self.DP,
-    #         minDist=int(self.MIN_DIST*scale),
-    #         param1=self.PARAM1,
-    #         param2=self.PARAM2,
-    #         minRadius=int(self.minradius*scale),
-    #         maxRadius=int(self.maxradius*scale)
-    #     )
-    #
-    #     circles_info = []
-    #     if circles is not None:
-    #         circles = circles[0, :]
-    #         for (x, y, r) in circles:
-    #             # if not ((self.padding * scale <= x <= W - self.padding * scale) and
-    #             #         (self.padding * scale <= y <= H - self.padding * scale)):  # Vision padding
-    #             #     continue
-    #             # if self.LOWERR <= hsv[y, x] <= self.UPPERR:
-    #             circles_info.append([y/H, x/W, int(r)])
-    #     circles_info = sorted(circles_info, key=lambda x: x[-1], reverse=True)
-    #     return circles_info[:self.B], (H, W) # We only return up to self.B number of circles
+    @staticmethod
+    def find_best_circles(circles_info, H, W, dist_tolerance=40 * SCALE):
+        """
+        :param circles_info: A list where each element has the form (circle_h, circle_w, radius) and is sorted in
+                decreasing radius. circle_h and circle_w are normalized in [0, 1].
+        :param H: The height of the image that the circle finder in vision operates under.
+        :param W: The width of the image that the circle finder in vision operates under.
+        :param dist_tolerance: The minimum distance between circles.
+        :return: We return a cleaned version of circles_info in descending radius.
+        It is worth noting that the function operates under scale=SCALE.
+        """
+        best_circles_info = []  # Returns elements of type (center_h, center_w, radius) in descending radius
+        centers_seen = []
+        if circles_info:  # Handling the base case where centers_seen is still empty
+            (center_h, center_w, radius) = circles_info.pop(0)
+            best_circles_info.append([center_h, center_w, radius])
+            centers_seen.append(np.array([center_h * H, center_w * W]))
 
+        while circles_info:
+            (center_h, center_w, radius) = circles_info.pop(0)
+            center = np.array([center_h * H, center_w * W])
+            min_dist_squared = min([np.inner(center - centroid, center - centroid) for centroid in centers_seen])
+            if min_dist_squared >= dist_tolerance ** 2:
+                best_circles_info.append([center_h, center_w, radius])
+                centers_seen.append(center)
+        return best_circles_info  # Already sorted by design!
+
+    @staticmethod
+    def ball_within_bounds(H_full, W_full, center, padding):
+        """
+        :param H_full: The height of the full-resolution image
+        :param W_full: The width of the full-resolution image
+        :param center: (height, width) of the ball center in pixels
+        :param padding: This prevents the ball centers from being too close to the edges and corners
+        :return: (bool of whether the ball is within bounds, the pixel coordinates of the top left corner of crop box,
+                and the pixel coordinates of the ball center within the crop)
+        """
+
+        center_h, center_w = map(int, center)
+        withinBound = (padding <= center_h <= H_full - padding) and (padding <= center_w <= W_full - padding)
+        if not withinBound:
+            return False, None, None
+
+        (hTL,
+         wTL) = center_h - CROP_H_3D // 2, center_w - CROP_W_3D // 2  # Actual pixel coordinates of the top-left corner
+        (hBR, wBR) = hTL + CROP_H_3D, wTL + CROP_W_3D
+        if hTL < 0:  # We have the top-left corner too high
+            hBR = hBR - hTL
+            hTL = 0  # hTL = hTL - hTL
+        elif hBR > H_full:  # We have the bottom-left corner too low
+            hTL = hTL - hBR + H_full
+            hBR = H_full  # hBR = hBR - hBR + H_full
+        if wTL < 0:  # We have the top-left corner too much to the left
+            wBR = wBR - wTL
+            wTL = 0  # wTL = wTL - wTL
+        elif wBR > W_full:  # We have the bottom-right corner too much to the right
+            wTL = wTL - wBR + W_full
+            wBR = W_full  # wBR = wBR - wBR + W_full
+
+        relCenterH, relCenterW = (center_h - hTL, center_w - wTL)  # For the depth estimation in Vision3D
+        return True, (hTL, wTL), (relCenterH, relCenterW)
 
 
 """Vision3D is responsible for the mechanics of depth estimation"""
@@ -224,13 +231,13 @@ class Vision3D:
         self.context = self.engine.create_execution_context()
         self.bindings, self.tensors = allocate_tensors(self.engine, 3)
 
-    @staticmethod
-    def depth_adjust(depth, x, y):
-        """Adjusts the depth of the ball given its relative position in the frame"""
-        dx = abs(x - 0.5)
-        dy = abs(y - 0.5)
-        denominator = 1.5825 - 0.5241 * dx - 0.2993 * dy - 2.2004 * dx ** 2 - 1.4422 * dy ** 2
-        return depth * (1.5825 / denominator)
+    # @staticmethod
+    # def depth_adjust(depth, x, y):
+    #     """Adjusts the depth of the ball given its relative position in the frame"""
+    #     dx = abs(x - 0.5)
+    #     dy = abs(y - 0.5)
+    #     denominator = 1.5825 - 0.5241 * dx - 0.2993 * dy - 2.2004 * dx ** 2 - 1.4422 * dy ** 2
+    #     return depth * (1.5825 / denominator)
 
     def normalized_to_meter_x(self, normalized_x, depth):
         """Converts normalized x coordinates to pixel coordinates"""
@@ -260,8 +267,8 @@ class Vision3D:
         disp_map_np = disp_map.cpu().numpy()[0, 0].astype(float)
         depths = []
         relCenterH, relCenterW = relCenter
-        for i in range(relCenterH - ball.radius // 2, relCenterH + ball.radius // 2):
-            for j in range(relCenterW - ball.radius // 2, relCenterW + ball.radius // 2):
+        for i in range(relCenterH - ball.radius, relCenterH + ball.radius):
+            for j in range(relCenterW - ball.radius, relCenterW + ball.radius):
                 if disp_map_np[i, j] == 0:
                     continue
                 depths.append(self.fx * self.B / disp_map_np[i, j])

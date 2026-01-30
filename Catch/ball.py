@@ -16,10 +16,11 @@ class Ball:
 class Ball2D(Ball):
     def __init__(self, position, velocity, radius, N, F, status_threshold=10):
         Ball.__init__(self, position, velocity, radius, N, F)
+        # Status variables
         self.status_threshold = status_threshold # The number of contiguous frames to consider a patch of yellow a ball
         self.contiguous_seen = 1
         self.confirmed_ball = False # Will be confirmed whenever self.contiguous_seen >= a certain threshold
-        # For debugging only
+
         self.updated = True  # Whether the ball was updated this frame
         self.framesSinceUpdate = 1
         self.lastObservedPosition = self.position # self.position could contain predictions too, not just observations
