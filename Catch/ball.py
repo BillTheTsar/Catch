@@ -14,7 +14,7 @@ class Ball:
         self.vPast = deque(maxlen=N)
 
 class Ball2D(Ball):
-    def __init__(self, position, velocity, radius, N, F, status_threshold=10):
+    def __init__(self, position, velocity, radius, N, F, status_threshold=20):
         Ball.__init__(self, position, velocity, radius, N, F)
         # Status variables
         self.status_threshold = status_threshold # The number of contiguous frames to consider a patch of yellow a ball

@@ -1,4 +1,4 @@
-CROP_W_2D, CROP_H_2D = 400, 300 # For focusing on the ball
+CROP_W_2D, CROP_H_2D = 240, 200 # For focusing on the ball
 CROP_W_3D, CROP_H_3D = 224, 224 # For feeding into the engine
 FPS = 60
 depthEstimationPeriod = 3 # We sample the depth once every 3 frames

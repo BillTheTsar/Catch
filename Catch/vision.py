@@ -29,28 +29,6 @@ class Vision2D:
         self.UPPERR = np.array(UPPERR, dtype=np.uint8)
         self.morphologyKernel = np.ones((ksize, ksize), dtype=np.uint8)
 
-    @staticmethod
-    def generate_web(centroid_h, centroid_w, step, H, W):
-        """
-        :param centroid_h: The pixel height of the centroid center.
-        :param centroid_w: The pixel width of the centroid center.
-        :param step: The interval size of the web.
-        :param H: Used to make sure the web is contained within the image.
-        :param W: Used to make sure the web is contained within the image.
-        :return: A list of at most 9 points surrounding the centroid center.
-        Used to determine whether the current centroid is a tennis ball or a yellow wall.
-        """
-        offsets = [-step, 0, step]
-        points = []
-
-        for di in offsets:
-            for dj in offsets:
-                ni = centroid_h + di
-                nj = centroid_w + dj
-                if 0 <= ni < H and 0 <= nj < W:
-                    points.append((ni, nj))
-        return points
-
     def find_centroids_hsv(self, left_img):
         """
         :param left_img: The rectified left image of the stereo pair in BGR format.
@@ -58,6 +36,7 @@ class Vision2D:
         :return: A list of centroids, each centroid is a tuple of (centroid_h, centroid_w, radius) and (H, W)
         """
         H, W = left_img.shape[:2]
+        currentScale = H/self.H
         hsv = cv2.cvtColor(left_img, cv2.COLOR_BGR2HSV) # Color conversion to HSV
         mask_raw = cv2.inRange(hsv, self.LOWER, self.UPPER) # Mask production using the HSV
 
@@ -77,7 +56,7 @@ class Vision2D:
         areas = stats_foreground[:, cv2.CC_STAT_AREA]
         radii = np.maximum(widths, heights) // 2 # Vectorized radii according to our definition
 
-        minRadiusScale, maxRadiusScale = self.minradius * SCALE, self.maxradius * SCALE
+        minRadiusScale, maxRadiusScale = self.minradius * currentScale, self.maxradius * currentScale
         valid_radius = (radii >= minRadiusScale) & (radii <= maxRadiusScale)
         theoretical_area = np.pi * radii ** 2
         valid_area = areas > (theoretical_area / 2)
@@ -94,7 +73,7 @@ class Vision2D:
             centroid_h_pixel = int(centroids_foreground[i, 1])
 
             # We now check whether the centroid is valid or likely a yellow wall
-            step = int(min(self.maxradius*SCALE, 2*radius))
+            step = int(min(self.maxradius*currentScale, 2*radius))
             rows = np.array([centroid_h_pixel - step, centroid_h_pixel, centroid_h_pixel + step], dtype=np.int32)
             cols = np.array([centroid_w_pixel - step, centroid_w_pixel, centroid_w_pixel + step], dtype=np.int32)
             valid_rows = (rows >= 0) & (rows < H)
@@ -104,7 +83,7 @@ class Vision2D:
             patch = hsv[np.ix_(rows_v, cols_v)]
             in_range = np.all((patch >= self.LOWERR) & (patch <= self.UPPERR), axis=-1)
             count_in_range = np.count_nonzero(in_range)
-            if count_in_range == 1:
+            if count_in_range <= 1:
                 centroid_w, centroid_h = centroid_w_pixel / W, centroid_h_pixel / H
                 centroids_info.append([centroid_h, centroid_w, radius])
         centroids_info = sorted(centroids_info, key=lambda x: x[-1], reverse=True)  # We reverse-sort by centroids by radius
@@ -138,11 +117,13 @@ class Vision2D:
         return best_circles_info  # Already sorted by design!
 
     @staticmethod
-    def ball_within_bounds(H_full, W_full, center, padding):
+    def ball_within_bounds(H_full, W_full, center, crop_h, crop_w, padding):
         """
         :param H_full: The height of the full-resolution image
         :param W_full: The width of the full-resolution image
         :param center: (height, width) of the ball center in pixels
+        :param crop_h: The height of the cropped image
+        :param crop_w: The width of the cropped image
         :param padding: This prevents the ball centers from being too close to the edges and corners
         :return: (bool of whether the ball is within bounds, the pixel coordinates of the top left corner of crop box,
                 and the pixel coordinates of the ball center within the crop)
@@ -153,9 +134,8 @@ class Vision2D:
         if not withinBound:
             return False, None, None
 
-        (hTL,
-         wTL) = center_h - CROP_H_3D // 2, center_w - CROP_W_3D // 2  # Actual pixel coordinates of the top-left corner
-        (hBR, wBR) = hTL + CROP_H_3D, wTL + CROP_W_3D
+        (hTL, wTL) = center_h - crop_h // 2, center_w - crop_w // 2  # Actual pixel coordinates of the top-left corner
+        (hBR, wBR) = hTL + crop_h, wTL + crop_w
         if hTL < 0:  # We have the top-left corner too high
             hBR = hBR - hTL
             hTL = 0  # hTL = hTL - hTL
@@ -177,7 +157,6 @@ class Vision2D:
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch.set_float32_matmul_precision('high')
-CROP_W, CROP_H = 224, 224 # For feeding into the engine
 
 def load_engine(path: str) -> trt.ICudaEngine:
     logger = trt.Logger(trt.Logger.WARNING)
@@ -209,7 +188,7 @@ def allocate_tensors(engine, max_batch=3):
         torch_dtype = trt_dtype_to_torch(np_dtype)
 
         if mode == trt.TensorIOMode.INPUT:
-            shape = (max_batch, 3, CROP_H, CROP_W)
+            shape = (max_batch, 3, CROP_H_3D, CROP_W_3D)
         else:
             # Ask engine for static output shape ignoring batch, then prepend max_batch
             out_shape = list(engine.get_tensor_shape(name))
@@ -272,8 +251,8 @@ class Vision3D:
         self.tensors["input_right"][:1].copy_(right_torch)
 
         self.context.set_input_shape("input_left",
-                                (1, 3, CROP_H, CROP_W))  # We don't need to specify for every input, but why not!
-        self.context.set_input_shape("input_right", (1, 3, CROP_H, CROP_W))
+                                (1, 3, CROP_H_3D, CROP_W_3D))  # We don't need to specify for every input, but why not!
+        self.context.set_input_shape("input_right", (1, 3, CROP_H_3D, CROP_W_3D))
 
         self.context.execute_v2(bindings=self.bindings)
         disp_map = self.tensors["output_disp"]

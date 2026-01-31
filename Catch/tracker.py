@@ -21,6 +21,8 @@ class Tracker2D(Tracker):
         self.dispTolerance = dispTolerance  # Maximum displacement tolerance allowed per frame
         self.radiusTolerance = radiusTolerance
         self.frame = 0
+        self.activelyTracking = False
+        self.activeBallIndex = None
 
     def update(self, potential_balls):
         """
@@ -36,8 +38,6 @@ class Tracker2D(Tracker):
             if (ball is not None) and (ball.F == self.frame): # It's been too long since we last saw the ball
                 self.balls[i] = None
                 empty_balls.add(i)
-            # if ball is not None:
-            #     print(ball.F, self.frame)
 
         for (p1_h, p1_w, r1) in potential_balls:
             updated = False
@@ -49,7 +49,7 @@ class Tracker2D(Tracker):
                     empty_balls.add(i)
                     continue
                 p0, v0, r0, f0 = ball.position, ball.velocity, ball.radius, ball.F
-                taylor_diff = p1 - (p0 + v0)
+                taylor_diff = p1 - p0
                 if np.linalg.norm(taylor_diff) < self.dispTolerance and abs(r1 - r0) < self.radiusTolerance: # A match
                     ball.move(p1) # Update its position
                     ball.radius = r1
@@ -86,6 +86,45 @@ class Tracker2D(Tracker):
 
         self.frame = (self.frame + 1)%self.F # Roll the frame over
 
+    def checkActive(self):
+        """
+        :return: None
+        This function checks whether there exists a single 2D ball which is confirmed, and calls the appropriate
+                auxiliary functions.
+        """
+        for i, ball in enumerate(self.balls):
+            if not ball:
+                continue
+            if ball.confirmed_ball and not self.activelyTracking: # There exists a single confirmed ball
+                self.beginActiveTracking()
+                return
+            elif ball.confirmed_ball and self.activelyTracking:
+                return # Nothing needs to be done
+        self.endActiveTracking()
+
+    def beginActiveTracking(self):
+        """
+        :return: None
+        This function must be called to transition from not actively tracking to actively tracking.
+        The function picks one suitable ball to actively track, ignoring all others.
+        """
+        self.activelyTracking = True
+        largestRadius = 0
+        for i, ball in enumerate(self.balls):
+            if not ball:
+                continue
+            if ball.confirmed_ball and ball.radius > largestRadius:
+                largestRadius = ball.radius
+                self.activeBallIndex = i
+
+    def endActiveTracking(self):
+        """
+        :return:
+        This function must be called to transition from actively tracking to not actively tracking.
+        """
+        self.activelyTracking = False
+        self.activeBallIndex = None
+
 
 class Tracker3D(Tracker):
     def __init__(self, B, dispTolerance, angleTolerance, minPPrimeLen=3):
@@ -98,7 +137,7 @@ class Tracker3D(Tracker):
         """Checks whether there have been self.predictedThreshold number of consecutive depth measurements"""
         if ball is None: return
         if ball.canPredict: return
-        if np.linalg.norm(ball.velocity) > depthEstimationPeriod*0.4: # The ball moved too fast to start prediction
+        if np.inner(ball.velocity, ball.velocity) > (depthEstimationPeriod*0.4)**2: # The ball moved too fast to start prediction
             self.balls[i] = Ball3D(position=ball.position, velocity=np.array([0, 0, 0]), radius=None, N=9, F=None)
             return
         if seen:
@@ -122,7 +161,8 @@ class Tracker3D(Tracker):
     def check_observation_prediction_compatible(self, ball: Ball3D, observedPosition):
         """Checks whether our observed position is compatible with our prediction. If it is, do nothing.
         Otherwise, we truncate ball.pPrimePast"""
-        if np.linalg.norm(ball.predictedNextPosition - observedPosition) > self.dispTolerance:
+        if (np.inner(ball.predictedNextPosition - observedPosition, ball.predictedNextPosition - observedPosition)
+                > self.dispTolerance)**2:
             # The code below keeps at most self.minPPrimeLen elements at the end of self.pPrimePast
             while len(ball.pPrimePast) > self.minPPrimeLen:
                 ball.pPrimePast.popleft()
@@ -250,4 +290,4 @@ class Meta2DTracker:
             elif ball2DStrict.confirmed_ball and not ball2DStrict.updated and ball2DLax.confirmed_ball:
                 ball2DStrict.move(ball2DLax.position)
                 ball2DStrict.confirm_status(True)
-                ball2DStrict.F = ball2DStrict.F
+                ball2DStrict.F = t1.F

@@ -10,8 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from configVariables import *
 
 # ========= USER SETTINGS =========
-video_path    = "C:/Users/HP/Pictures/Camera Roll/WIN_20251128_19_59_42_Pro.mp4"
-out_video     = "track2D/overlay5.mp4"
+video_path    = "C:/Users/HP/Pictures/Camera Roll/(0.536, 2.175).mp4"
+out_video     = "track2D/overlay(0.536, 2.175).mp4"
+out_crop      = "track2D/cropFootage.mp4"
 out_csv       = "track2D/predictTrackMisc.csv"
 NPZ_PATH      = "D:/Catch/stereoExperiment/stereo_params.npz"
 K_TXT         = "K.txt"   # for the FULL rectified frame
@@ -75,10 +76,12 @@ mapLx_downscaled = mapLx[::2, ::2] * SCALE # These 4 downscaled maps are for bal
 mapLy_downscaled = mapLy[::2, ::2] * SCALE
 # mapRx_downscaled = mapRx[::2, ::2] * SCALE
 # mapRy_downscaled = mapRy[::2, ::2] * SCALE
-mapLx_crop = np.empty((CROP_H_3D,CROP_W_3D), np.float32) # These 4 are for depth estimation
-mapLy_crop = np.empty((CROP_H_3D,CROP_W_3D), np.float32)
-mapRx_crop = np.empty((CROP_H_3D,CROP_W_3D), np.float32)
-mapRy_crop = np.empty((CROP_H_3D,CROP_W_3D), np.float32)
+mapLx_crop_3D = np.empty((CROP_H_3D,CROP_W_3D), np.float32) # These 4 are for depth estimation
+mapLy_crop_3D = np.empty((CROP_H_3D,CROP_W_3D), np.float32)
+mapRx_crop_3D = np.empty((CROP_H_3D,CROP_W_3D), np.float32)
+mapRy_crop_3D = np.empty((CROP_H_3D,CROP_W_3D), np.float32)
+mapLx_crop_2D = np.empty((CROP_H_2D, CROP_W_2D), np.float32) # These 2 are for active tracking
+mapLy_crop_2D = np.empty((CROP_H_2D, CROP_W_2D), np.float32)
 
 # Opening video
 cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG)
@@ -87,25 +90,33 @@ if not cap.isOpened():
 fps    = cap.get(cv2.CAP_PROP_FPS)
 W_full = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))//2
 H_full = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+H_centroids, W_centroids = H_full * SCALE, W_full * SCALE
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 out = cv2.VideoWriter(str(out_video), fourcc, fps//4, (int(W_full*SCALE), int(H_full*SCALE)))
 if not out.isOpened():
     cap.release()
     raise IOError(f"Could not open output VideoWriter: {out_video}")
+# outCrop = cv2.VideoWriter(str(out_crop), fourcc, fps//4, (CROP_W_2D, CROP_H_2D))
+# if not outCrop.isOpened():
+#     cap.release()
+#     raise IOError(f"Could not open output VideoWriter: {out_crop}")
 
 B = 3
 F = 7
 # Instantiating all objects
-tracker2DStrict = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(16*SCALE))
-tracker2DLax = tracker.Tracker2D(B=B,F=F,dispTolerance=0.10,radiusTolerance=int(16*SCALE))
+tracker2DStrict = tracker.Tracker2D(B=B,F=F,dispTolerance=0.05,radiusTolerance=int(16*SCALE))
+tracker2DLax = tracker.Tracker2D(B=B,F=F,dispTolerance=0.05,radiusTolerance=int(16*SCALE))
 strictLaxPool = ThreadPoolExecutor(max_workers=2)
 
 tracker_3D = tracker.Tracker3D(B=B, dispTolerance=0.15, angleTolerance=np.pi/4)
+
 eyes2DStrict = vision.Vision2D(H=H_full, W=W_full, B=B, LOWER=[26, 75, 80], UPPER=[41, 255, 255],
                           LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=64, ksize=3)
 eyes2DLax = vision.Vision2D(H=H_full, W=W_full, B=B, LOWER=[21, 70, 80], UPPER=[45, 255, 255],
                             LOWERR=[23,70,75], UPPERR=[43,255,255], minradius=2, maxradius=24, ksize=3)
+eyes2DFocus = vision.Vision2D(H=CROP_H_2D, W=CROP_W_2D, B=1, LOWER=[26, 75, 80], UPPER=[41, 255, 255],
+                              LOWERR=[23,75,75], UPPERR=[43,255,255], minradius=2, maxradius=64, ksize=3)
 eyes3D = vision.Vision3D(H_full=H_full, W_full=W_full, K_path=K_TXT, engine_path=ENGINE_PATH)
 meta2DTracker = tracker.Meta2DTracker(B, B)
 
@@ -131,17 +142,58 @@ while True:
         break
 
     left_full, right_full = split_sbs(frame_bgr) # Full scale images
-    left_downscaled = cv2.resize(left_full,  (int(W_full * SCALE), int(H_full * SCALE)),
+    # Delete these lines afterwards!
+    left_downscaled = cv2.resize(left_full, (int(W_full * SCALE), int(H_full * SCALE)),
                                  interpolation=cv2.INTER_AREA)
     rectL_downscaled = cv2.remap(left_downscaled, mapLx_downscaled, mapLy_downscaled, cv2.INTER_LINEAR,
-                      borderMode=cv2.BORDER_CONSTANT)
-    H_centroids, W_centroids = rectL_downscaled.shape[:2]
-    f_strict = strictLaxPool.submit(updateStrict, rectL_downscaled)
-    f_lax = strictLaxPool.submit(updateLax, rectL_downscaled)
-    f_strict.result()
-    f_lax.result()
-    meta2DTracker.produceMatchMap(tracker2DStrict, tracker2DLax, 0.03)
-    meta2DTracker.processMatchMap(tracker2DStrict, tracker2DLax)
+                                 borderMode=cv2.BORDER_CONSTANT)
+    if tracker2DStrict.activelyTracking: # Tight crop but full resolution
+        # First create a crop around where the ball was previously seen
+        trackedBall = tracker2DStrict.balls[tracker2DStrict.activeBallIndex]
+        trackedBall_h, trackedBall_w = trackedBall.position # In normalized coordinates
+        withinBound, TL, relCenter = eyes2DFocus.ball_within_bounds(
+            H_full, W_full, (trackedBall_h * H_full, trackedBall_w * W_full), CROP_H_2D, CROP_W_2D, padding=0)
+        if withinBound:
+            corner_h_crop_2D, corner_w_crop_2D = TL
+            mapLx_crop_2D[:] = mapLx[
+                corner_h_crop_2D:corner_h_crop_2D + CROP_H_2D, corner_w_crop_2D:corner_w_crop_2D + CROP_W_2D]
+            mapLy_crop_2D[:] = mapLy[
+                corner_h_crop_2D:corner_h_crop_2D + CROP_H_2D, corner_w_crop_2D:corner_w_crop_2D + CROP_W_2D]
+            Lc2D = cv2.remap(
+                left_full,
+                mapLx_crop_2D,
+                mapLy_crop_2D,
+                cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT
+            )
+            # outCrop.write(Lc2D)
+            centroids = eyes2DFocus.find_centroids_hsv(Lc2D)  # Bottleneck line
+            if centroids: # We found at least 1 ball
+                centroid_h, centroid_w, radius = centroids[0] # Convert to global normalized coordinates
+                global_centroid_h = (corner_h_crop_2D + centroid_h * CROP_H_2D)/H_full
+                global_centroid_w = (corner_w_crop_2D + centroid_w * CROP_W_2D)/W_full
+                radius = int(radius * SCALE)
+                tracker2DStrict.update([[global_centroid_h, global_centroid_w, radius]])
+                tracker2DLax.update([[global_centroid_h, global_centroid_w, radius]])
+            else: # We didn't find any balls within the crop
+                tracker2DStrict.update([])
+                tracker2DLax.update([])
+        else: # Tracked ball not even in the frame
+            tracker2DStrict.update([])
+            tracker2DLax.update([])
+    else: # Full FOV but downscaled resolution
+        # Uncomment these lines afterwards!
+        # left_downscaled = cv2.resize(left_full, (int(W_full * SCALE), int(H_full * SCALE)),
+        #                              interpolation=cv2.INTER_AREA)
+        # rectL_downscaled = cv2.remap(left_downscaled, mapLx_downscaled, mapLy_downscaled, cv2.INTER_LINEAR,
+        #                   borderMode=cv2.BORDER_CONSTANT)
+        f_strict = strictLaxPool.submit(updateStrict, rectL_downscaled)
+        f_lax = strictLaxPool.submit(updateLax, rectL_downscaled)
+        f_strict.result()
+        f_lax.result()
+        meta2DTracker.produceMatchMap(tracker2DStrict, tracker2DLax, 0.03)
+        meta2DTracker.processMatchMap(tracker2DStrict, tracker2DLax)
+    tracker2DStrict.checkActive() # Activates or deactivates for the next frame
 
     # We write to the csv file now
     line = [frame_id]
@@ -152,17 +204,17 @@ while True:
             line += [ball.position[1], ball.position[0], ball.radius, ball.updated, ball.confirmed_ball]
     writer.writerow(line)
 
-    # ----------------------------------- The real stuff happens here -----------------------------------
+    # ----------------------------------- The 3D stuff happens here -----------------------------------
 
     # Frame annotation
     for i, ball in enumerate(tracker2DStrict.balls):
-        if ball is None or not ball.confirmed_ball: # We can't do anything
+        if ball is None or not ball.confirmed_ball: # We can't do anything in 3D
             tracker_3D.balls[i] = None
             continue
-        ball3D = tracker_3D.balls[i]  # The corresponding 3D counterpart
-        (center_h, center_w) = ball.position
+        ball3D = tracker_3D.balls[i] # The corresponding 3D counterpart
+        (center_h, center_w) = ball.position # Normalized 2D coordinates
         withinBound, TL, relCenter = eyes2DStrict.ball_within_bounds(
-            H_full, W_full, (center_h * H_full,center_w * W_full), padding=padding)
+            H_full, W_full, (center_h * H_full,center_w * W_full), CROP_H_3D, CROP_W_3D, padding=padding)
         if not withinBound: # Either out of bounds or not a confirmed ball. Ignore.
             continue
         cv2.circle(rectL_downscaled, center=(int(W_centroids * ball.position[1]), int(H_centroids * ball.position[0])),
@@ -171,28 +223,27 @@ while True:
         # Depth observation, we should only perform once every depthEstimationPeriod frames and if the ball was seen
         if frame_id % depthEstimationPeriod == 0:
             if ball.updated: # We saw the 2D ball this frame
-                corner_h_crop, corner_w_crop = TL
-                mapLx_crop[:] = mapLx[corner_h_crop:corner_h_crop + CROP_H_3D, corner_w_crop:corner_w_crop + CROP_W_3D]
-                mapLy_crop[:] = mapLy[corner_h_crop:corner_h_crop + CROP_H_3D, corner_w_crop:corner_w_crop + CROP_W_3D]
-                mapRx_crop[:] = mapRx[corner_h_crop:corner_h_crop + CROP_H_3D, corner_w_crop:corner_w_crop + CROP_W_3D]
-                mapRy_crop[:] = mapRy[corner_h_crop:corner_h_crop + CROP_H_3D, corner_w_crop:corner_w_crop + CROP_W_3D]
+                corner_h_crop_3D, corner_w_crop_3D = TL
+                mapLx_crop_3D[:] = mapLx[corner_h_crop_3D:corner_h_crop_3D + CROP_H_3D, corner_w_crop_3D:corner_w_crop_3D + CROP_W_3D]
+                mapLy_crop_3D[:] = mapLy[corner_h_crop_3D:corner_h_crop_3D + CROP_H_3D, corner_w_crop_3D:corner_w_crop_3D + CROP_W_3D]
+                mapRx_crop_3D[:] = mapRx[corner_h_crop_3D:corner_h_crop_3D + CROP_H_3D, corner_w_crop_3D:corner_w_crop_3D + CROP_W_3D]
+                mapRy_crop_3D[:] = mapRy[corner_h_crop_3D:corner_h_crop_3D + CROP_H_3D, corner_w_crop_3D:corner_w_crop_3D + CROP_W_3D]
 
                 Lc = cv2.remap(
                     left_full,
-                    mapLx_crop,
-                    mapLy_crop,
+                    mapLx_crop_3D,
+                    mapLy_crop_3D,
                     cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_CONSTANT
                 )
                 Rc = cv2.remap(
                     right_full,
-                    mapRx_crop,
-                    mapRy_crop,
+                    mapRx_crop_3D,
+                    mapRy_crop_3D,
                     cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_CONSTANT
                 )
-                # Lc = rectL[corner_h_crop:corner_h_crop + CROP_H_3D, corner_w_crop:corner_w_crop + CROP_W_3D].copy()
-                # Rc = rectR[corner_h_crop:corner_h_crop + CROP_H_3D, corner_w_crop:corner_w_crop + CROP_W_3D].copy()
+                # The following lines requires 1.8 frames of compute. We can upper bound it by 2.
                 (X, Y, depth) = eyes3D.estimate_position(ball, Lc, Rc, relCenter)  # We have the observed coordinates
                 pos3D = np.array([X, Y, depth])  # Observation in meters
                 if ball3D is None: # Handling an edge case
@@ -235,16 +286,15 @@ while True:
 
         # Fix from here!
         X, Y, depth = pos3D
-        cv2.putText(rectL_downscaled, f"({np.round(X, 2)}, {np.round(Y, 2)}, {np.round(depth, 2)})",
-                    (int(W_centroids * ball.position[1]), int(H_centroids * ball.position[0])),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (200, 200, 0),
-                    1,
-                    2)
+        # cv2.putText(rectL_downscaled, f"({np.round(X, 2)}, {np.round(Y, 2)}, {np.round(depth, 2)})",
+        #             (int(W_centroids * ball.position[1]), int(H_centroids * ball.position[0])),
+        #             cv2.FONT_HERSHEY_SIMPLEX,
+        #             0.5,
+        #             (200, 200, 0),
+        #             1,
+        #             2)
 
         if posStar3D is not None and len(posStar3D)>0:
-            # print(frame_id, pos3D[1], [posStar[1] for posStar in posStar3D])
             (XStar, YStar, depthStar) = posStar3D[-1]
             print(frame_id, [XStar, YStar, depthStar], [X, Y, depth])
 
@@ -257,15 +307,16 @@ while True:
             cv2.circle(rectL_downscaled, center=(center_xStar, center_yStar),
                        radius=4, color=(255, 0, 0),
                        thickness=4)  # Draw a blue circle
-            # print()
 
     out.write(rectL_downscaled)
     frame_id += 1
 
 cap.release()
 out.release()
+# outCrop.release()
 csvfile.close()
 strictLaxPool.shutdown(wait=True)
 
 t1 = time.time()
 print(f"Time taken for video with {frame_id} frames: {t1 - t0} seconds")
+print(f"Could have saved {0.06*(t1 - t0)} seconds")
