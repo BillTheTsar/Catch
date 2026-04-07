@@ -1,5 +1,5 @@
 import numpy as np
-from configVariables import *
+from config import CONFIG
 from collections import deque
 
 def geometricVelocitySum(pPrimePast: deque, vPast: deque, i, alpha) -> float:

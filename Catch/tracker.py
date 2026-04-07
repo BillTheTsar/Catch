@@ -1,7 +1,9 @@
+# tracker.py
+
 from ball import Ball2D, Ball3D
 import numpy as np
 import estimator
-from configVariables import *
+from config import CONFIG
 from collections import deque
 
 """
@@ -35,7 +37,7 @@ class Tracker2D(Tracker):
         empty_balls = set() # Contains indices of balls = None
 
         for i, ball in enumerate(self.balls): # Cleaning balls that have not been seen for F frames
-            if (ball is not None) and (ball.F == self.frame): # It's been too long since we last saw the ball
+            if (ball is not None) and (self.frame - ball.F) >= self.F: # It's been too long since we last saw the ball
                 self.balls[i] = None
                 empty_balls.add(i)
 
@@ -53,7 +55,7 @@ class Tracker2D(Tracker):
                 if np.linalg.norm(taylor_diff) < self.dispTolerance and abs(r1 - r0) < self.radiusTolerance: # A match
                     ball.move(p1) # Update its position
                     ball.radius = r1
-                    ball.framesSinceUpdate = (self.frame - ball.F) % self.F
+                    ball.framesSinceUpdate = self.frame - ball.F
                     # num_updates += 1
                     updated_balls.add(i)
                     updated = True
@@ -62,7 +64,7 @@ class Tracker2D(Tracker):
             if not updated and empty_balls: # Our potential ball can become a new ball we track!
                 first_empty_index = min(empty_balls)
                 empty_balls.remove(first_empty_index) # That index will no longer be empty
-                self.balls[first_empty_index] = Ball2D(p1, np.array([0, 0]), r1, 6, self.frame)
+                self.balls[first_empty_index] = Ball2D(p1, np.array([0, 0]), r1, CONFIG.tracker2d.n_ball, self.frame, CONFIG.tracker2d.status_threshold)
                 # updated = True
                 updated_balls.add(first_empty_index)
                 # num_updates += 1
@@ -84,7 +86,7 @@ class Tracker2D(Tracker):
                 ball.updated = False
                 ball.confirm_status(False) # We didn't see the ball this frame
 
-        self.frame = (self.frame + 1)%self.F # Roll the frame over
+        self.frame += 1 # Roll the frame over
 
     def checkActive(self):
         """
@@ -92,15 +94,18 @@ class Tracker2D(Tracker):
         This function checks whether there exists a single 2D ball which is confirmed, and calls the appropriate
                 auxiliary functions.
         """
-        for i, ball in enumerate(self.balls):
-            if not ball:
-                continue
-            if ball.confirmed_ball and not self.activelyTracking: # There exists a single confirmed ball
-                self.beginActiveTracking()
+        confirmed_indices = [i for i, ball in enumerate(self.balls) if ball is not None and ball.confirmed_ball]
+        # No confirmed balls
+        if not confirmed_indices:
+            self.endActiveTracking()
+            return
+        # Verify the current ball is still active.
+        if self.activelyTracking:
+            if (self.activeBallIndex is not None and self.balls[self.activeBallIndex] is not None
+                and self.balls[self.activeBallIndex].confirmed_ball):
                 return
-            elif ball.confirmed_ball and self.activelyTracking:
-                return # Nothing needs to be done
-        self.endActiveTracking()
+        # Choose a new ball to track
+        self.beginActiveTracking()
 
     def beginActiveTracking(self):
         """
@@ -109,13 +114,17 @@ class Tracker2D(Tracker):
         The function picks one suitable ball to actively track, ignoring all others.
         """
         self.activelyTracking = True
-        largestRadius = 0
+        self.activeBallIndex = None
+        largestRadius = -1
         for i, ball in enumerate(self.balls):
-            if not ball:
+            if ball is None:
                 continue
             if ball.confirmed_ball and ball.radius > largestRadius:
                 largestRadius = ball.radius
                 self.activeBallIndex = i
+
+        if self.activeBallIndex is None:
+            self.endActiveTracking()
 
     def endActiveTracking(self):
         """
@@ -133,20 +142,20 @@ class Tracker3D(Tracker):
         self.angleTolerance = angleTolerance # In radians
         self.minPPrimeLen = minPPrimeLen # Must be strictly smaller than the N for balls
 
-    def update_predictability(self, i, ball: Ball3D, seen) -> None:
-        """Checks whether there have been self.predictedThreshold number of consecutive depth measurements"""
+    def update_predictability(self, i, ball: Ball3D, seen, tIntervals=None) -> None:
+        """Checks whether there have been prediction_threshold number of consecutive depth measurements"""
         if ball is None: return
         if ball.canPredict: return
-        if np.inner(ball.velocity, ball.velocity) > (depthEstimationPeriod*0.4)**2: # The ball moved too fast to start prediction
-            self.balls[i] = Ball3D(position=ball.position, velocity=np.array([0, 0, 0]), radius=None, N=9, F=None)
+        if np.inner(ball.velocity, ball.velocity) > CONFIG.tracker3d.velocity_bound: # The ball moved too fast to start prediction
+            self.balls[i] = Ball3D(position=ball.position, velocity=np.array([0, 0, 0]), radius=None, N=CONFIG.tracker3d.n_ball, F=None)
             return
         if seen:
             ball.consecutiveZ += 1
-            if ball.consecutiveZ == ball.predictedThreshold: # Very important, we reset our pPast, vPast and pPrimePast
+            if ball.consecutiveZ == CONFIG.tracker3d.prediction_threshold: # Very important, we reset our pPast, vPast and pPrimePast
                 ball.canPredict = True
-                ball.rescalePast()
+                ball.rescalePastExcludingLast(tIntervals)
         else:
-            ball.consecutiveZ = 1
+            ball.consecutiveZ = 0
 
     def update(self, i, ball, position, seen):
         """We update the 3D balls we track one ball at a time.
@@ -154,7 +163,7 @@ class Tracker3D(Tracker):
             reset ball.pPrimePast. This should resolve impact events such as hitting the floor."""
         if not seen and ball is None: return
         if ball is None: # If there is no ball at the corresponding position
-            self.balls[i] = Ball3D(position=position, velocity=np.array([0,0,0]), radius=None, N=9, F=None)
+            self.balls[i] = Ball3D(position=position, velocity=np.array([0,0,0]), radius=None, N=CONFIG.tracker3d.n_ball, F=None)
         else: # There is a 3D ball
             ball.move(position)
 
@@ -162,15 +171,17 @@ class Tracker3D(Tracker):
         """Checks whether our observed position is compatible with our prediction. If it is, do nothing.
         Otherwise, we truncate ball.pPrimePast"""
         if (np.inner(ball.predictedNextPosition - observedPosition, ball.predictedNextPosition - observedPosition)
-                > self.dispTolerance)**2:
+                > self.dispTolerance**2):
             # The code below keeps at most self.minPPrimeLen elements at the end of self.pPrimePast
             while len(ball.pPrimePast) > self.minPPrimeLen:
                 ball.pPrimePast.popleft()
             return
         # Angle check
+        if len(ball.vPast) < 2:
+            return
         a = np.linalg.norm(ball.vPast[-1])
         b = np.linalg.norm(ball.vPast[-2])
-        if a*b == 0: # Edge case
+        if abs(a*b) <= 1e-6: # Edge case
             return
         else:
             clippedProd = np.clip(np.dot(ball.vPast[-1], ball.vPast[-2])/(a*b), a_min=-1, a_max=1)
@@ -199,7 +210,7 @@ class Tracker3D(Tracker):
 
     @staticmethod
     def predict_position_n_frames(ball: Ball3D, del_t: float, m):
-        """Predicts the next n positions of the ball. If the ball is None, we do nothing. Otherwise,
+        """Predicts the next m positions of the ball. If the ball is None, we do nothing. Otherwise,
                 run estimator.bestVelocity3DGravity."""
         vStar, ball.predictedNextPosition = estimator.bestVelocity3DGravity(ball.pPrimePast, del_t)
         predictions = []
@@ -220,25 +231,31 @@ class Tracker3D(Tracker):
         # vStar, prediction = estimator.bestVelocity3DGravity(pPrimePast, del_t)
         # predictions.append(prediction)
 
-        predictions = []
-        n = len(ball.pPrimePast)
-        y = ball.predictedNextPosition[1]
-        i = 0
-        while y <= cameraHeight:
-            predictions.append(ball.pPrimePast[0] + vStar * (del_t * (n+i)) + 0.5 * np.array([0, 9.81, 0]) * (del_t * (n+i)) ** 2)
-            i += 1
-            y = predictions[-1][1]
-        return predictions
+        # predictions = []
+        # n = len(ball.pPrimePast)
+        # y = ball.predictedNextPosition[1]
+        # i = 0
+        # while y <= cameraHeight: # Bug
+        #     predictions.append(ball.pPrimePast[0] + vStar * (del_t * (n+i)) + 0.5 * np.array([0, 9.81, 0]) * (del_t * (n+i)) ** 2) # Bug??
+        #     i += 1
+        #     y = predictions[-1][1]
+        x, y, z = ball.pPrimePast[0]
+        vx, vy, vz = vStar
+        if y >= CONFIG.runtime.camera_height:
+            return []
+        timeLanding = (-vy + np.sqrt(vy**2 + 2*9.81*(CONFIG.runtime.camera_height - y)))/9.81
+
+        return np.array([x + vx * timeLanding, CONFIG.runtime.camera_height, z + vz * timeLanding])
 
     @staticmethod
-    def educated_guess_position(ball2D: Ball2D, ball3D: Ball3D, eyes3D):
+    def educated_guess_position(ball2D_h, ball2D_w, ball3D: Ball3D, eyes3D):
         """Even if we don't observe depth, sometimes we can make predictions based on past depths.
         The difference between educated_guess_position and predict_next_position is that we have x and y information
         for the former and only infer the depth, while we predict all 3 coordinates for the latter."""
         # if ball3D is None: return
-        zPred = estimator.geometricVelocitySum(ball3D.pPrimePast, ball3D.vPast, 2, z_alpha)  # We can now make a depth prediction
-        xPred = eyes3D.normalized_to_meter_x(ball2D.position[1], zPred)
-        yPred = eyes3D.normalized_to_meter_y(ball2D.position[0], zPred)
+        zPred = estimator.geometricVelocitySum(ball3D.pPrimePast, ball3D.vPast, 2, CONFIG.smoothing.z_alpha)  # We can now make a depth prediction
+        xPred = eyes3D.normalized_to_meter_x(ball2D_w, zPred)
+        yPred = eyes3D.normalized_to_meter_y(ball2D_h, zPred)
         pos3DPred = np.array([xPred, yPred, zPred])
         return pos3DPred
 
@@ -254,7 +271,7 @@ class Meta2DTracker:
         self.distSquared = np.empty((m, n), dtype=dtype)
         self.matchPattern = np.empty((m, n), dtype=bool)
 
-    def produceMatchMap(self, t1: Tracker2D, t2: Tracker2D, threshold: float) -> np.ndarray:
+    def produceMatchMap(self, t1: Tracker2D, t2: Tracker2D, threshold: float):
         """a contains centroids in the strict regime
         b contains centroids in the lax regime"""
         a = t1.balls
@@ -286,7 +303,7 @@ class Meta2DTracker:
 
         for (ball2DStrict, ball2DLax) in matchedPairs:
             if not ball2DStrict.confirmed_ball and ball2DStrict.updated and ball2DLax.confirmed_ball:  # We can now prime the strict ball
-                ball2DStrict.prime(2)
+                ball2DStrict.prime(CONFIG.tracker2d.prime)
             elif ball2DStrict.confirmed_ball and not ball2DStrict.updated and ball2DLax.confirmed_ball:
                 ball2DStrict.move(ball2DLax.position)
                 ball2DStrict.confirm_status(True)

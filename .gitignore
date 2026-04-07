@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Generated outputs
+Catch/track2D/*.mp4
+Catch/track2D/*.csv
+Catch/track2D/*.log
+
+# Keep the directory itself
+!Catch/track2D/.gitkeep
+
+# Other experimental directories
+depthMapVisualizations/
+foundationStereoTesting/
+pointCloudVisualizations/
+stereoExperiment/
+
+# Large / local binaries
+*.engine
+
+# Optional local experiment clutter
+Catch/testEngineSpeed.py
+Catch/simulation.py
+Catch/prediction_n.py
+Catch/main2D.py
+Catch/3D_position_overlay.py
+systemBlockDiagram.txt

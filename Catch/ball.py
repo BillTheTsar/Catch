@@ -1,7 +1,7 @@
 from collections import deque
 import estimator
 import numpy as np
-from configVariables import *
+from config import CONFIG
 
 class Ball:
     def __init__(self, position, velocity, radius, N, F):
@@ -63,7 +63,7 @@ class Ball2D(Ball):
 
 
 class Ball3D(Ball):
-    def __init__(self, position, velocity, radius, N, F, predictionThreshold=2):
+    def __init__(self, position, velocity, radius, N, F):
         # Notice that radius doesn't hold any meaning here since it is fixed in 3D
         Ball.__init__(self, position, velocity, radius, N, F)
         self.pPast.append(self.position)
@@ -71,7 +71,7 @@ class Ball3D(Ball):
         self.pPrimePast.append(self.position) # Necessary initialization
         self.predictedNextPosition = None # This would be a 3D vector once running
         self.predictedLandingPosition = None # This would be a 3D vector once determined
-        self.predictedThreshold = predictionThreshold # The # consecutive depth measurements before we start predicting
+        self.predictedSmoothedLandingPosition = None # This would be a smoothed version of the last line
         self.consecutiveZ = 1
         self.canPredict = False
 
@@ -80,29 +80,53 @@ class Ball3D(Ball):
         """A method that updates the position and velocity of the ball when it was not seen"""
         pass
 
-    def rescalePast(self):
+    # def rescalePast(self):
+    #     """Resets self.pPast, self.vPast and self.pPrimePast to initialize prediction
+    #     1. At the start, we have self.predictedThreshold number of data points spaced apart by depthEstimationPeriod
+    #         Thus, we have (self.predictedThreshold - 1)*depthEstimationPeriod + 1 potential interpolates to work with.
+    #     2. We sequentially densify our pPast, vPast and pPrimePast
+    #     """
+    #     tempPPast = deque(maxlen=self.N)
+    #     tempVPast = deque(maxlen=self.N)
+    #     # tempPPrimePast = deque(maxlen=self.N)
+    #     while len(self.pPast) > self.predictedThreshold:
+    #         self.pPast.popleft()
+    #     for i in range(self.predictedThreshold - 1): # At this point, self.predictedThreshold = len(self.pPast)
+    #         startP = self.pPast[i]
+    #         # print(len(self.pPast), i, self.predictedThreshold-1)
+    #         endP = self.pPast[i + 1]
+    #         tempPPast.append(startP) # We add the starting point
+    #         for j in range(1, depthEstimationPeriod):
+    #             t = j/depthEstimationPeriod
+    #             intermediate = (1.0 - t)*startP + t*endP
+    #             tempPPast.append(intermediate)
+    #             tempVPast.append((endP-startP)/depthEstimationPeriod) # Even velocity by design
+    #         tempVPast.append((endP-startP)/depthEstimationPeriod)
+    #     tempPPast.append(endP)# We add the end point here
+    #     self.pPast = tempPPast.copy()
+    #     self.pPrimePast = tempPPast.copy()
+    #     self.vPast = tempVPast.copy()
+
+    def rescalePastExcludingLast(self, tIntervals):
         """Resets self.pPast, self.vPast and self.pPrimePast to initialize prediction
-        1. At the start, we have self.predictedThreshold number of data points spaced apart by depthEstimationPeriod
-            Thus, we have (self.predictedThreshold - 1)*depthEstimationPeriod + 1 potential interpolates to work with.
+        1. At the start, we have prediction_threshold number of data points spaced apart by tIntervals
         2. We sequentially densify our pPast, vPast and pPrimePast
         """
         tempPPast = deque(maxlen=self.N)
         tempVPast = deque(maxlen=self.N)
-        # tempPPrimePast = deque(maxlen=self.N)
-        while len(self.pPast) > self.predictedThreshold:
+        assert len(tIntervals) == CONFIG.tracker3d.prediction_threshold
+        while len(self.pPast) > CONFIG.tracker3d.prediction_threshold:
             self.pPast.popleft()
-        for i in range(self.predictedThreshold - 1): # At this point, self.predictedThreshold = len(self.pPast)
+        for i in range(CONFIG.tracker3d.prediction_threshold - 1):  # At this point, prediction_threshold = len(self.pPast)
             startP = self.pPast[i]
-            # print(len(self.pPast), i, self.predictedThreshold-1)
+            # print(len(self.pPast), i, prediction_threshold-1)
             endP = self.pPast[i + 1]
-            tempPPast.append(startP) # We add the starting point
-            for j in range(1, depthEstimationPeriod):
-                t = j/depthEstimationPeriod
-                intermediate = (1.0 - t)*startP + t*endP
+            for j in range(tIntervals[i]):
+                t = j / tIntervals[i]
+                intermediate = (1.0 - t) * startP + t * endP
                 tempPPast.append(intermediate)
-                tempVPast.append((endP-startP)/depthEstimationPeriod) # Even velocity by design
-            tempVPast.append((endP-startP)/depthEstimationPeriod)
-        tempPPast.append(endP)# We add the end point here
+                tempVPast.append((endP - startP) / tIntervals[i])  # Even velocity by design
+        tempVPast.pop()
         self.pPast = tempPPast.copy()
         self.pPrimePast = tempPPast.copy()
         self.vPast = tempVPast.copy()

@@ -1,4 +1,6 @@
-from configVariables import *
+# vision.py
+
+from config import CONFIG
 import os
 import cv2
 import numpy as np
@@ -59,7 +61,7 @@ class Vision2D:
         minRadiusScale, maxRadiusScale = self.minradius * currentScale, self.maxradius * currentScale
         valid_radius = (radii >= minRadiusScale) & (radii <= maxRadiusScale)
         theoretical_area = np.pi * radii ** 2
-        valid_area = areas > (theoretical_area / 2)
+        valid_area = areas > (theoretical_area / 3)
         valid_mask = valid_area & valid_radius
         idxs = np.flatnonzero(valid_mask)
 
@@ -83,14 +85,14 @@ class Vision2D:
             patch = hsv[np.ix_(rows_v, cols_v)]
             in_range = np.all((patch >= self.LOWERR) & (patch <= self.UPPERR), axis=-1)
             count_in_range = np.count_nonzero(in_range)
-            if count_in_range <= 1:
+            if count_in_range == 1:
                 centroid_w, centroid_h = centroid_w_pixel / W, centroid_h_pixel / H
                 centroids_info.append([centroid_h, centroid_w, radius])
         centroids_info = sorted(centroids_info, key=lambda x: x[-1], reverse=True)  # We reverse-sort by centroids by radius
         return centroids_info[:self.B]  # We only return up to self.B number of centroids
 
     @staticmethod
-    def find_best_circles(circles_info, H, W, dist_tolerance=40 * SCALE):
+    def find_best_circles(circles_info, H, W, dist_tolerance=40 * CONFIG.runtime.scale):
         """
         :param circles_info: A list where each element has the form (circle_h, circle_w, radius) and is sorted in
                 decreasing radius. circle_h and circle_w are normalized in [0, 1].
@@ -177,7 +179,7 @@ def trt_dtype_to_torch(np_dtype):
         return torch.uint8
     raise TypeError(f"Unsupported dtype from TensorRT: {np_dtype}")
 
-def allocate_tensors(engine, max_batch=3):
+def allocate_tensors(engine, max_batch=1):
     tensors = {} # A dictionary of name_of_tensor: actual_tensor_memory
     bindings = [0] * engine.num_io_tensors # A list of pointers to the actual_tensor_memory
 
@@ -188,7 +190,7 @@ def allocate_tensors(engine, max_batch=3):
         torch_dtype = trt_dtype_to_torch(np_dtype)
 
         if mode == trt.TensorIOMode.INPUT:
-            shape = (max_batch, 3, CROP_H_3D, CROP_W_3D)
+            shape = (max_batch, 3, CONFIG.crop.crop_h_3d, CONFIG.crop.crop_w_3d)
         else:
             # Ask engine for static output shape ignoring batch, then prepend max_batch
             out_shape = list(engine.get_tensor_shape(name))
@@ -223,15 +225,9 @@ class Vision3D:
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.engine = load_engine(engine_path)
         self.context = self.engine.create_execution_context()
-        self.bindings, self.tensors = allocate_tensors(self.engine, 3)
-
-    # @staticmethod
-    # def depth_adjust(depth, x, y):
-    #     """Adjusts the depth of the ball given its relative position in the frame"""
-    #     dx = abs(x - 0.5)
-    #     dy = abs(y - 0.5)
-    #     denominator = 1.5825 - 0.5241 * dx - 0.2993 * dy - 2.2004 * dx ** 2 - 1.4422 * dy ** 2
-    #     return depth * (1.5825 / denominator)
+        self.bindings, self.tensors = allocate_tensors(self.engine, 1)
+        self.context.set_input_shape("input_left", (1, 3, CONFIG.crop.crop_h_3d, CONFIG.crop.crop_w_3d))
+        self.context.set_input_shape("input_right", (1, 3, CONFIG.crop.crop_h_3d, CONFIG.crop.crop_w_3d))
 
     def normalized_to_meter_x(self, normalized_x, depth):
         """Converts normalized x coordinates to pixel coordinates"""
@@ -242,32 +238,70 @@ class Vision3D:
         return (self.H_full * normalized_y - self.cy) / self.fy * depth
 
 
-    def estimate_position(self, ball, Lc, Rc, relCenter):
+    def estimate_position(self, ball_h, ball_w, ball_r, Lc, Rc, relCenter):
         """Estimates the depth of the ball given its relative position in the frame"""
-        left_torch = (torch.from_numpy(Lc).permute(-1, 0, 1).unsqueeze(0)).half().to(self.device)
-        right_torch = (torch.from_numpy(Rc).permute(-1, 0, 1).unsqueeze(0)).half().to(self.device)
+        # Lc = cv2.cvtColor(Lc, cv2.COLOR_BGR2RGB)
+        # Rc = cv2.cvtColor(Rc, cv2.COLOR_BGR2RGB)
 
-        self.tensors["input_left"][:1].copy_(left_torch)  # We fill the space in tensors with our real inputs
-        self.tensors["input_right"][:1].copy_(right_torch)
+        left_torch = torch.from_numpy(Lc).permute(2, 0, 1).unsqueeze(0).to(device=self.device, dtype=torch.uint8)
+        right_torch = torch.from_numpy(Rc).permute(2, 0, 1).unsqueeze(0).to(device=self.device, dtype=torch.uint8)
 
-        self.context.set_input_shape("input_left",
-                                (1, 3, CROP_H_3D, CROP_W_3D))  # We don't need to specify for every input, but why not!
-        self.context.set_input_shape("input_right", (1, 3, CROP_H_3D, CROP_W_3D))
+        self.tensors["input_left"][:1].copy_(left_torch, non_blocking=True) # We fill the space in tensors with our real inputs
+        self.tensors["input_right"][:1].copy_(right_torch, non_blocking=True)
 
         self.context.execute_v2(bindings=self.bindings)
-        disp_map = self.tensors["output_disp"]
-        torch.cuda.synchronize()
 
-        disp_map_np = disp_map.cpu().numpy()[0, 0].astype(float)
-        depths = []
+        # Debugging
+        # print("row abs diff mean:", np.mean(np.abs(Lc - Rc)))
+        #
+        # print("output_disp shape:", tuple(disp.shape),
+        #       "nan count:", int(torch.isnan(disp).sum().item()),
+        #       "min:", float(torch.nan_to_num(disp, nan=0.0).min().item()),
+        #       "max:", float(torch.nan_to_num(disp, nan=0.0).max().item()))
+
+        # End of debugging
+
+        disp_map = self.tensors["output_disp"][0, 0]
         relCenterH, relCenterW = relCenter
-        for i in range(relCenterH - ball.radius, relCenterH + ball.radius):
-            for j in range(relCenterW - ball.radius, relCenterW + ball.radius):
-                if disp_map_np[i, j] == 0:
-                    continue
-                depths.append(self.fx * self.B / disp_map_np[i, j])
+        i0 = max(0, relCenterH - ball_r)
+        i1 = min(CONFIG.crop.crop_h_3d, relCenterH + ball_r + 1)
+        j0 = max(0, relCenterW - ball_r)
+        j1 = min(CONFIG.crop.crop_w_3d, relCenterW + ball_r + 1)
+        patch = disp_map[i0:i1, j0:j1]
+        valid = torch.isfinite(patch) & (patch > 1e-6)
 
-        depth = np.median(depths)
-        X = (self.W_full * ball.position[1] - self.cx) / self.fx * depth
-        Y = (self.H_full * ball.position[0] - self.cy) / self.fy * depth
+        if not torch.any(valid):
+            return (np.nan, np.nan, np.nan)
+
+        depth_patch = (self.fx * self.B) / patch[valid]
+        depth = torch.median(depth_patch).item()
+
+        # disp_map_np = disp_map.cpu().numpy()[0, 0].astype(float)
+        #
+        # patch = disp_map_np[i0:i1, j0:j1]
+        #
+        # valid = np.isfinite(patch) & (patch > 1e-6)
+        # if not np.any(valid):
+        #     return (np.nan, np.nan, np.nan)
+        #
+        # depth_patch = (self.fx * self.B) / patch[valid]  # 1D
+        # depth = np.median(depth_patch)  # no NaNs now
+
+        X = (self.W_full * ball_w - self.cx) / self.fx * depth
+        Y = (self.H_full * ball_h - self.cy) / self.fy * depth
         return (X, Y, depth)
+
+    def warmup(self, num_iters: int = 3):
+        """
+        Run a few dummy inferences so that the first real inference is fast.
+        """
+        dummy_left = torch.zeros((1, 3, CONFIG.crop.crop_h_3d, CONFIG.crop.crop_w_3d), device=self.device, dtype=torch.uint8)
+        dummy_right = torch.zeros((1, 3, CONFIG.crop.crop_h_3d, CONFIG.crop.crop_w_3d), device=self.device, dtype=torch.uint8)
+
+        for _ in range(num_iters):
+            self.tensors["input_left"][:1].copy_(dummy_left, non_blocking=True)
+            self.tensors["input_right"][:1].copy_(dummy_right, non_blocking=True)
+            self.context.execute_v2(bindings=self.bindings)
+
+            # Touch output so work is definitely realized
+            _ = self.tensors["output_disp"][0, 0, 0, 0].item()
