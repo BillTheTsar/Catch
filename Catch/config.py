@@ -46,11 +46,11 @@ class SmoothingConfig:
 class PathConfig:
     engine_path: Path = Path("D:/S2M2/s2m2/engines/S2M2_L_224_224_fp16.engine") # Path to accelerated TRT engine.
     video_path: Path = Path("C:/Users/HP/Pictures/Camera Roll/(-0.291, 3.080).mp4") # Source video for annotation. MUST CHANGE.
-    out_video_path: Path = Path("track2D/overlay(-0.291, 3.080)Kalman.mp4") # Output video path annotator writes to. MUST CHANGE.
-    out_csv_path: Path = Path("track2D/predictTrackMisc.csv") # Output csv path annotator and main write to.
+    out_video_path: Path = Path("output/overlay(-0.291, 3.080)Kalman.mp4") # Output video path annotator writes to. MUST CHANGE.
+    out_csv_path: Path = Path("output/predictTrackMisc.csv") # Output csv path annotator and main write to.
     npz_path: Path = Path("D:/Catch/stereoExperiment/stereo_params.npz") # npz file annotator and main read from. MUST CHANGE.
     k_txt: Path = Path("K.txt") # The K file to convert disparity to meters. MUST CHANGE.
-    save_dir: Path = Path("track2D") # The directory we save outputs to.
+    save_dir: Path = Path("output") # The directory we save outputs to.
 
 
 @dataclass(frozen=True)
