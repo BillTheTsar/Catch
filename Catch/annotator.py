@@ -419,8 +419,9 @@ def run(CONFIG):
                 continue
             # The code from here ONLY runs if we have a confirmed ball within bounds.
             if CONFIG.runtime.save_video:
-                cv2.circle(rectL_downscaled, center=(int(W_centroids * ball2D.position[1]), int(H_centroids * ball2D.position[0])),
-                        radius=ball2D.radius, color=CONFIG.annotator.ball_color, thickness=2) # Draw a yellow circle
+                if ball2D.updated:
+                    cv2.circle(rectL_downscaled, center=(int(W_centroids * ball2D.position[1]), int(H_centroids * ball2D.position[0])),
+                            radius=ball2D.radius, color=CONFIG.annotator.ball_color, thickness=2) # Draw a yellow circle
                 frameBuffer[frame_id] = rectL_downscaled.copy()
                 flush_ready_frames()
 
